@@ -147,6 +147,15 @@ payloads.
 - A red banner when media volume is under 70%, with a button that opens the volume panel.
 - A blocking screen if the microphone permission is refused, with a way into app settings.
 
+## Install
+
+No toolchain needed to try it: the [latest release](https://github.com/retrocodes12/sotto/releases/latest)
+carries a debug-signed APK. Put it on both phones and open it, or from a computer:
+
+```sh
+adb install -r sotto-v0.2-debug.apk
+```
+
 ## Build
 
 Needs JDK 17, Android SDK platform 36, NDK 28.2.13676358 and CMake 3.22.1, all available from
