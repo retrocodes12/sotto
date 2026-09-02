@@ -246,11 +246,11 @@ private fun ProtocolRow(vm: MainViewModel) {
         Spacer(Modifier.height(4.dp))
         Box {
             OutlinedButton(onClick = { open = true }, modifier = Modifier.fillMaxWidth().height(52.dp), enabled = !vm.busy) {
-                Text(GgWave.protocolName(vm.protocolId), modifier = Modifier.weight(1f))
+                Text(Modem.protocolName(vm.protocolId), modifier = Modifier.weight(1f))
                 Text("▾")
             }
             DropdownMenu(expanded = open, onDismissRequest = { open = false }) {
-                GgWave.protocols.forEach { p ->
+                Modem.protocols.forEach { p ->
                     DropdownMenuItem(
                         text = { Text(p.name, fontWeight = if (p.id == vm.protocolId) FontWeight.Bold else null) },
                         onClick = { vm.protocolId = p.id; open = false },
@@ -259,8 +259,13 @@ private fun ProtocolRow(vm: MainViewModel) {
             }
         }
         Spacer(Modifier.height(8.dp))
+        val capped = vm.effectiveTxVolume != vm.txVolume
         Row(verticalAlignment = Alignment.CenterVertically) {
-            Text("Tx amplitude ${vm.txVolume}", style = MaterialTheme.typography.labelLarge, modifier = Modifier.width(130.dp))
+            Text(
+                if (capped) "Tx amplitude ${vm.txVolume} (ggwave uses ${vm.effectiveTxVolume})" else "Tx amplitude ${vm.txVolume}",
+                style = MaterialTheme.typography.labelLarge,
+                modifier = Modifier.width(130.dp),
+            )
             Slider(
                 value = vm.txVolume.toFloat(),
                 onValueChange = { vm.txVolume = it.roundToInt() },
@@ -360,8 +365,10 @@ private fun ComposeRow(vm: MainViewModel) {
                 isError = over,
                 maxLines = 3,
                 supportingText = {
+                    val air = Modem.airtime(vm.protocolId, vm.draftBytes)
                     Text(
-                        "${vm.draftBytes} / ${MainViewModel.MAX_BYTES} bytes",
+                        if (air != null && vm.draftBytes > 0) "${vm.draftBytes} / ${MainViewModel.MAX_BYTES} bytes · %.1f s of audio".format(air)
+                        else "${vm.draftBytes} / ${MainViewModel.MAX_BYTES} bytes",
                         color = if (over) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 },

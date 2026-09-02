@@ -84,7 +84,7 @@ def text(x, y, s, size, th_color, family=SANS, weight=400, tracking=0, anchor="s
             f'fill="{th_color}"{ls} text-anchor="{anchor}" {extra}>{s}</text>')
 
 
-def hero(pcm, th):
+def hero(pcm, th, label="Sotto Fast"):
     W, H = 1400, 520
     S, secs = spectrogram(pcm)
     px, py, pw, ph = 640, 96, 690, 340
@@ -95,12 +95,12 @@ def hero(pcm, th):
 {text(66, 300, "sotto", 176, th["ink"], SANS, 700, "-0.05em")}
 {text(72, 352, "Type on one phone. The other one hears it.", 15, th["muted"], SANS, 400)}
 <line x1="72" y1="392" x2="200" y2="392" stroke="{th["line"]}" stroke-opacity="0.35"/>
-{text(72, 418, "A message is a chirp.", 12, th["muted"], MONO, 500, "0.08em")}
+{text(72, 418, "One tone at a time, sixty-four to choose from.", 12, th["muted"], MONO, 500, "0.08em")}
 {text(72, 438, "The other phone's microphone", 12, th["muted"], MONO, 500, "0.08em")}
 {text(72, 458, "is the only receiver you need.", 12, th["muted"], MONO, 500, "0.08em")}
 {text(px, 74, "ONE MESSAGE, AS THE RECEIVER HEARS IT", 11, th["muted"], MONO, 500, "0.22em")}
 {spec}
-{text(px, py + ph + 30, f"“hello” · Audible Fast · {secs:.2f} s of audio", 12, th["ink"], MONO, 500, "0.04em")}
+{text(px, py + ph + 30, f"“hello” · {label} · {secs:.2f} s of audio", 12, th["ink"], MONO, 500, "0.04em")}
 {text(px + pw, py + ph + 30, f"{khz(lo, hi)} · 48 kHz · 1024-sample frames", 12, th["muted"], MONO, 500, "0.04em", "end")}
 {text(px + pw + 14, py + 8, f"{hi / 1000:.1f}k", 10, th["muted"], MONO, 500, extra='dominant-baseline="hanging"')}
 {text(px + pw + 14, py + ph, f"{lo / 1000:.1f}k", 10, th["muted"], MONO, 500)}
@@ -113,7 +113,7 @@ def protocols(items, th):
     gap, x0, y0, pw, ph = 40, 72, 84, (1400 - 2 * 72 - 2 * 40) // 3, 240
     parts = [f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {W} {H}" width="{W}" height="{H}" role="img" aria-label="the same message in three ggwave protocol families">',
              f'<rect width="{W}" height="{H}" fill="{th["ground"]}"/>',
-             text(x0, 52, "THE SAME FIVE BYTES, THREE WAYS", 11, th["muted"], MONO, 500, "0.22em")]
+             text(x0, 52, "THE SAME FIVE BYTES, THREE WAYS · SOTTO MODEM VS GGWAVE", 11, th["muted"], MONO, 500, "0.22em")]
     for i, (label, sub, pcm) in enumerate(items):
         S, secs = spectrogram(pcm)
         x = x0 + i * (pw + gap)
@@ -127,12 +127,12 @@ def protocols(items, th):
 
 def main(src, out):
     os.makedirs(out, exist_ok=True)
-    items = [("Audible Fast", "6 tones, 3 bytes per chunk", f"{src}/hello_fast.pcm"),
-             ("Ultrasound Fast", "same code, moved above hearing", f"{src}/hello_ufast.pcm"),
-             ("Dual-tone Fast", "2 tones, 1 byte per chunk", f"{src}/hello_dtfast.pcm")]
+    items = [("Sotto Fast", "one tone, 6 bits, 21 ms symbols", f"{src}/hello_sotto_fast.pcm"),
+             ("Sotto Robust", "one tone, 6 bits, 43 ms symbols", f"{src}/hello_sotto_robust.pcm"),
+             ("ggwave Audible Fast", "six tones at once, 128 ms chunks", f"{src}/hello_fast.pcm")]
     for name, th in THEMES.items():
         with open(f"{out}/hero-{name}.svg", "w") as f:
-            f.write(hero(f"{src}/hello_fast.pcm", th))
+            f.write(hero(f"{src}/hello_sotto_fast.pcm", th))
         with open(f"{out}/protocols-{name}.svg", "w") as f:
             f.write(protocols(items, th))
     for fn in sorted(os.listdir(out)):

@@ -22,7 +22,7 @@ import kotlin.math.sqrt
  * Half-duplex audio link.
  *
  * A dedicated capture thread reads 1024-sample frames from AudioRecord and feeds them to the
- * ggwave decoder. A single-threaded transmit executor encodes messages and plays them through
+ * modem decoders. A single-threaded transmit executor encodes messages and plays them through
  * AudioTrack. Decoding is muted from the moment playback starts until [RESUME_GUARD_MS] after
  * it ends, so a phone never decodes its own transmission. Capture keeps running while muted so
  * the record buffer does not fill up with stale audio.
@@ -43,7 +43,7 @@ class SoundLink(context: Context, private val callbacks: Callbacks) {
     }
 
     private val audioManager: AudioManager = context.getSystemService(AudioManager::class.java)
-    private val ggwave = GgWave(SAMPLE_RATE)
+    private val modem = Modem(SAMPLE_RATE)
     private val txExecutor = Executors.newSingleThreadExecutor { r -> Thread(r, "sotto-tx") }
 
     private val decodeMuted = AtomicBoolean(false)
@@ -74,10 +74,10 @@ class SoundLink(context: Context, private val callbacks: Callbacks) {
 
     /**
      * Encodes and plays [payload], blocking the transmit thread until playback has drained and
-     * decoding is enabled again. Returns false if ggwave refused to encode.
+     * decoding is enabled again. Returns false if the modem refused to encode.
      */
     fun transmit(payload: ByteArray, protocolId: Int, volume: Int): Boolean {
-        val wave = ggwave.encode(payload, protocolId, volume) ?: return false
+        val wave = modem.encode(payload, protocolId, volume) ?: return false
         decodeMuted.set(true)
         callbacks.onTransmitting(true)
         try {
@@ -105,10 +105,10 @@ class SoundLink(context: Context, private val callbacks: Callbacks) {
         )
     }
 
-    /** Stops capture, then frees ggwave on the transmit thread once any in-flight transmit ends. */
+    /** Stops capture, then frees the modem on the transmit thread once any in-flight transmit ends. */
     fun close() {
         stopListening()
-        txExecutor.execute { ggwave.close() }
+        txExecutor.execute { modem.close() }
         txExecutor.shutdown()
     }
 
@@ -123,7 +123,7 @@ class SoundLink(context: Context, private val callbacks: Callbacks) {
         }
         val (record, sourceName) = opened
         val effects = disableEffects(record.audioSessionId)
-        val frame = ShortArray(GgWave.SAMPLES_PER_FRAME)
+        val frame = ShortArray(Modem.SAMPLES_PER_FRAME)
         var reason: String? = null
         try {
             record.startRecording()
@@ -160,8 +160,11 @@ class SoundLink(context: Context, private val callbacks: Callbacks) {
                 }
 
                 if (!decodeMuted.get()) {
-                    val payload = ggwave.decode(frame, n)
-                    if (payload != null) callbacks.onMessage(payload, ggwave.lastRxProtocolId)
+                    var payload = modem.decode(frame, n)
+                    while (payload != null) {
+                        callbacks.onMessage(payload, modem.lastRxProtocolId)
+                        payload = modem.takePending()
+                    }
                 }
             }
         } catch (e: Exception) {
@@ -185,7 +188,7 @@ class SoundLink(context: Context, private val callbacks: Callbacks) {
             Log.e(TAG, "48 kHz mono capture unsupported (minBuf=$minBuf)")
             return null
         }
-        val bufferBytes = max(minBuf * 4, GgWave.SAMPLES_PER_FRAME * 2 * 8)
+        val bufferBytes = max(minBuf * 4, Modem.SAMPLES_PER_FRAME * 2 * 8)
 
         val unprocessed = audioManager.getProperty(
             AudioManager.PROPERTY_SUPPORT_AUDIO_SOURCE_UNPROCESSED
@@ -295,7 +298,7 @@ class SoundLink(context: Context, private val callbacks: Callbacks) {
 
     companion object {
         private const val TAG = "SoundLink"
-        const val SAMPLE_RATE = GgWave.SAMPLE_RATE
+        const val SAMPLE_RATE = Modem.SAMPLE_RATE
         const val RESUME_GUARD_MS = 300L
         private const val LEVEL_EVERY_READS = 4
     }

@@ -36,7 +36,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app), SoundLink.Callbac
         private set
     var transmitting by mutableStateOf(false)
         private set
-    var protocolId by mutableIntStateOf(GgWave.DEFAULT_PROTOCOL_ID)
+    var protocolId by mutableIntStateOf(Modem.DEFAULT_PROTOCOL_ID)
     var txVolume by mutableIntStateOf(DEFAULT_TX_VOLUME)
     var draft by mutableStateOf("")
     var mediaVolume by mutableFloatStateOf(1f)
@@ -68,6 +68,10 @@ class MainViewModel(app: Application) : AndroidViewModel(app), SoundLink.Callbac
 
     val canSend: Boolean
         get() = draftBytes in 1..MAX_BYTES && !busy
+
+    /** Amplitude actually handed to the modem: ggwave's multi-tone sum clips above 25. */
+    val effectiveTxVolume: Int
+        get() = if (protocolId >= Modem.SOTTO_ID_BASE) txVolume else minOf(txVolume, Modem.GGWAVE_MAX_VOLUME)
 
     // ---- listening ----------------------------------------------------------------------
 
@@ -101,13 +105,13 @@ class MainViewModel(app: Application) : AndroidViewModel(app), SoundLink.Callbac
         val text = draft
         val bytes = text.toByteArray(Charsets.UTF_8)
         val pid = protocolId
-        val vol = txVolume
+        val vol = effectiveTxVolume
         status = null
         link.post {
             val ok = link.transmit(bytes, pid, vol)
             main.post {
                 if (ok) addLog(LogEntry.Kind.TX, text, pid, bytes.size)
-                else status = "ggwave refused to encode ${bytes.size} bytes with ${GgWave.protocolName(pid)}"
+                else status = "${Modem.protocolName(pid)} refused to encode ${bytes.size} bytes"
             }
         }
     }
@@ -118,7 +122,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app), SoundLink.Callbac
         burstSent = 0
         burstCancel.set(false)
         val pid = protocolId
-        val vol = txVolume
+        val vol = effectiveTxVolume
         addLog(LogEntry.Kind.INFO, "Test burst started: $BURST_COUNT x ${BURST_PAYLOAD_BYTES} bytes, ${BURST_GAP_MS / 1000} s gap", pid, 0)
         link.post {
             var sent = 0
@@ -195,7 +199,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app), SoundLink.Callbac
     // ---- helpers ------------------------------------------------------------------------
 
     private fun addLog(kind: LogEntry.Kind, text: String, protocolId: Int, bytes: Int) {
-        log.add(0, LogEntry(clock.format(Date()), kind, text, GgWave.protocolName(protocolId), bytes))
+        log.add(0, LogEntry(clock.format(Date()), kind, text, Modem.protocolName(protocolId), bytes))
         while (log.size > MAX_LOG) log.removeAt(log.size - 1)
     }
 
@@ -220,7 +224,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app), SoundLink.Callbac
 
     companion object {
         const val MAX_BYTES = 100
-        const val DEFAULT_TX_VOLUME = 30
+        const val DEFAULT_TX_VOLUME = 90
         const val BURST_COUNT = 10
         const val BURST_GAP_MS = 2000L
         const val BURST_PAYLOAD_BYTES = 20

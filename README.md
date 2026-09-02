@@ -1,9 +1,9 @@
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/hero-dark.svg">
-  <img alt="sotto. The word hello, encoded as sound by ggwave and drawn as a spectrogram: two dense marker blocks with six-tone data hops between them. 1.19 seconds, 1.8 to 6.2 kHz." src="docs/hero-light.svg" width="100%">
+  <img alt="sotto. The word hello as the Sotto modem sends it, drawn as a spectrogram: a single tone hopping between 64 frequencies, 27 symbols, 0.58 seconds." src="docs/hero-light.svg" width="100%">
 </picture>
 
-<sub>The banner is not decoration. It is the word “hello”, encoded by this app with ggwave’s Audible Fast protocol and drawn from the actual 48 kHz waveform: a start marker, five bytes of six-tone hops, an end marker. 1.19 seconds of air.</sub>
+<sub>The banner is not decoration. It is the word “hello” as this app sends it, drawn from the actual 48 kHz waveform: four sync tones, the length twice, then 14 bytes of Reed–Solomon-protected data, one tone per six bits. 27 tones, 0.58 seconds of air.</sub>
 
 # sotto
 
@@ -11,17 +11,19 @@ Type on one phone. It chirps. The other phone hears the chirp and prints your wo
 
 Sotto is a messenger whose only network is the air between a speaker and a microphone. No
 pairing, no server, no account, no permission beyond the mic. Both roles live in one Android
-app, so any two phones with it installed can talk in either direction, and anything else that
-can hear and run ggwave can listen in.
+app, so any two phones with it installed can talk in either direction.
+
+It ships its own modem, written for this app, and keeps [ggwave](https://github.com/ggerganov/ggwave)
+next to it so the two can be compared on real phones with the built-in test burst.
 
 | | |
 |---|---|
-| **Carrier** | sound. Audible protocols sit around 1.8–6.2 kHz, ultrasound around 15–19 kHz |
-| **Payload** | up to 100 bytes of UTF-8 per message (ggwave itself allows 140) |
-| **Speed** | 20 bytes in 1.4 to 2.8 s on the audible protocols |
-| **Integrity** | Reed–Solomon parity inside ggwave. A message decodes intact or not at all |
-| **Stack** | Kotlin, Jetpack Compose, ggwave 0.4.3 in C++ through the NDK, minSdk 26 |
-| **Footprint** | four Kotlin files, one C++ file, no dependencies beyond Compose |
+| **Carrier** | one tone at a time, 2.1–8.0 kHz audible or 15–18 kHz ultrasound |
+| **Payload** | up to 100 bytes of UTF-8 per message |
+| **Speed** | 5 bytes in 0.58 s, 20 bytes in 1.17 s, 100 bytes in 4.0 s |
+| **Integrity** | Reed–Solomon parity and a CRC-16. A message decodes intact or not at all |
+| **Modem** | 500 lines of C++, 24 KB of decoder heap, 3 ms of CPU per second of audio |
+| **Stack** | Kotlin, Jetpack Compose, C++ through the NDK, minSdk 26 |
 
 ## How a message travels
 
@@ -29,52 +31,118 @@ can hear and run ggwave can listen in.
 sequenceDiagram
     participant A as Phone A (sending)
     participant B as Phone B (listening)
-    Note over A: ggwave turns the bytes into a waveform:<br/>parity, start marker, tone hops, end marker
+    Note over A: bytes -> parity + CRC -> 6-bit symbols -> one tone each:<br/>4 sync tones, the length twice, then the data
     A->>A: pause its own decoder
-    A->>B: AudioTrack plays the waveform through the speaker
+    A->>B: AudioTrack plays the tones through the speaker
     Note over B: AudioRecord at 48 kHz mono, 1024-sample frames,<br/>own thread, echo cancel / noise / AGC switched off
-    B->>B: ggwave spots the start marker, collects frames, checks parity
-    B->>B: log  12:04:31  IN  Audible Fast  5 B  hello
+    B->>B: FFT every 5 ms, sync word spotted, tones read at symbol rate
+    B->>B: parity corrected, CRC checked, log: 12:04:31 IN Sotto Fast 5 B hello
     Note over A: 300 ms after the last sample leaves the DAC<br/>the decoder resumes
 ```
 
 Half duplex, on purpose. A phone never decodes its own chirp because capture keeps running
 while transmitting but decoding is gated: off the moment playback starts, back on 300 ms
-after `playbackHeadPosition` reports the final sample played. The record buffer never fills
-with stale audio, so the first frame after the gate lifts is live.
+after `playbackHeadPosition` reports the final sample played.
 
-## The same five bytes, three ways
+## The modem
+
+A phone speaker is peak limited. ggwave's audible protocols play six tones at once, so each
+tone gets a sixth of the amplitude, which is a 36× loss of power per tone before the sound
+has left the phone. The Sotto modem plays one tone at a time and chooses it from 64, so every
+symbol carries six bits with the whole speaker behind it. That single decision is worth about
+15 dB, and the rest of the design spends it on speed and on rooms:
+
+- **Alternating frequency sets.** Odd and even symbols use disjoint sets of 64 tones, so the
+  reverberation of one symbol lands on bins the next symbol does not use.
+- **Tail cancellation.** During a symbol's window, the other set's bins hold nothing but the
+  decaying tail of earlier symbols. Half of that energy is subtracted before the tone is
+  picked. It took Fast mode from 96% to 100% in the simulated room.
+- **A four-tone sync word** instead of ggwave's two 340 ms markers. Symbol timing comes from
+  the best-scoring FFT hop, accurate to a quarter symbol, which the alternating sets forgive.
+- **The length sent twice**, each copy with a CRC-4, before the data.
+- **Reed–Solomon plus CRC-16.** Parity scales with the frame (6 to 32 bytes). Symbols whose
+  best tone barely beats the runner-up are passed to the decoder as erasures, which it can
+  fix at twice the rate of unknown errors. The CRC means noise never decodes to garbage.
+- **Streaming.** The decoder delivers the message the moment the last symbol has arrived.
+  No end marker, no post-analysis.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/protocols-dark.svg">
-  <img alt="Three spectrograms of the word hello: Audible Fast at 1.5 to 6.7 kHz, Ultrasound Fast with the identical pattern shifted to 14.6 to 19.8 kHz, and Dual-tone Fast at 0.8 to 3 kHz taking 2.22 seconds." src="docs/protocols-light.svg" width="100%">
+  <img alt="Three spectrograms of the word hello: Sotto Fast, a single tone hopping over 0.58 seconds; Sotto Robust, the same over 1.15 seconds; ggwave Audible Fast, six tones at once between two dense marker blocks over 1.19 seconds." src="docs/protocols-light.svg" width="100%">
 </picture>
 
-ggwave ships nine protocols this app can transmit with. Ultrasound is the audible code moved
-above hearing; dual-tone trades speed for speakers that cannot hold six tones at once. The
-receiver decodes all of them at all times, so the two phones do not have to agree on one.
-The log tells you which protocol each message arrived on.
+### Measured against ggwave
 
-| Protocol | Band | 20 bytes | 100 bytes | Reach for it when |
+`tools/bench.cpp` runs both modems through the same simulated air channel: every waveform
+is normalised to the same peak (the speaker's limit), attenuated 20 dB for distance, and hit
+with white noise at the level in the header. The room variant adds six early reflections,
+a comb-filter reverb tail with an RT60 of 0.35 s, and a random ±8 dB speaker/mic tilt.
+20-byte payloads, 24 trials per cell, percentage decoded correctly.
+
+Free field, signal peak −21 dBFS at the microphone:
+
+| noise, dBFS | −40 | −30 | −25 | −20 | −15 | −10 | −5 |
+|---|---|---|---|---|---|---|---|
+| **Sotto Fast** | 100 | 100 | 100 | 100 | 100 | 96 | 0 |
+| **Sotto Robust** | 100 | 100 | 100 | 100 | 100 | 100 | 67 |
+| ggwave Normal | 100 | 100 | 92 | 0 | 0 | 0 | 0 |
+| ggwave Fast | 100 | 100 | 96 | 0 | 0 | 0 | 0 |
+| ggwave Fastest | 100 | 100 | 100 | 0 | 0 | 0 | 0 |
+
+Room, same signal:
+
+| noise, dBFS | −40 | −30 | −25 | −20 | −15 | −10 | −5 |
+|---|---|---|---|---|---|---|---|
+| **Sotto Fast** | 100 | 100 | 100 | 100 | 75 | 4 | 0 |
+| **Sotto Robust** | 100 | 100 | 100 | 100 | 83 | 46 | 0 |
+| ggwave Normal | 100 | 96 | 17 | 0 | 0 | 0 | 0 |
+| ggwave Fast | 100 | 83 | 21 | 4 | 0 | 0 | 0 |
+| ggwave Fastest | 100 | 75 | 17 | 0 | 0 | 0 | 0 |
+| ggwave Fast, hard-clipped | 38 | 54 | 42 | 12 | 0 | 0 | 0 |
+
+Sotto Fast keeps decoding with noise 6 dB above the signal's own peak; ggwave stops about
+10 dB before that in free field and 15 dB before it in the room. The last row is what
+happens when ggwave's six-tone sum is driven past full scale to make it louder: clipping
+breaks it even without noise, which is why the app caps ggwave's amplitude at 25.
+
+| | airtime, 20 B | airtime, 100 B | decoder heap | decoder CPU |
 |---|---|---|---|---|
-| Audible Normal | 1.8–6.2 kHz | 2.8 s | 9.9 s | the room is loud or the phones are far apart |
-| **Audible Fast** (default) | 1.8–6.2 kHz | 2.1 s | 6.8 s | most of the time |
-| Audible Fastest | 1.8–6.2 kHz | 1.4 s | 3.8 s | the phones share a table |
-| Ultrasound Normal / Fast / Fastest | 15–19 kHz | 2.8 / 2.1 / 1.4 s | 9.9 / 6.8 / 3.8 s | it must be silent to adults. Needs a clear line of sight and hardware that actually reaches 19 kHz; many phones do not |
-| Dual-tone Normal / Fast / Fastest | about 1–3 kHz | 6.6 / 4.7 / 2.7 s | 28.1 / 19.0 / 9.8 s | the sending speaker is tiny or the receiver is a cheap mic |
+| Sotto Fast | 1.17 s | 4.0 s | 24 KB | 2.9 ms per s of audio |
+| Sotto Robust | 2.35 s | 8.0 s | 40 KB | 3.1 ms |
+| Sotto Ultrasound | 2.82 s | 9.6 s | 36 KB | 3.0 ms |
+| ggwave Fast | 2.09 s | 6.8 s | 8.2 MB | 0.6 ms idle, more while analysing |
+| ggwave Fastest | 1.39 s | 3.8 s | 8.2 MB | |
 
-Airtime measured on the host with the vendored ggwave; the app adds 0.1 s of trailing
-silence and the 0.3 s guard. ggwave's mono-tone protocols are not offered because they only
-work with fixed-length payloads.
+The channel is a model. Real speakers, real rooms and real phones are the next thing this
+table needs, and the app's test burst exists to get those numbers.
+
+## Protocols
+
+The receiver decodes every protocol at all times, so the two phones do not have to agree on
+one. The log tells you which protocol each message arrived on.
+
+| Protocol | Band | Symbol | 20 bytes | Reach for it when |
+|---|---|---|---|---|
+| **Sotto Fast** (default) | 2.1–8.0 kHz | 21 ms | 1.17 s | most of the time |
+| Sotto Robust | 2.1–8.0 kHz, tones 47 Hz apart | 43 ms | 2.35 s | far apart, loud room, or someone is walking |
+| Sotto Ultrasound | 15–18 kHz | 43 ms, 5 bits | 2.82 s | it must be silent to adults; needs hardware that reaches 18 kHz |
+| ggwave Normal / Fast / Fastest | 1.8–6.2 kHz | 192 / 128 / 64 ms chunks | 2.8 / 2.1 / 1.4 s | comparison, and talking to other ggwave software |
+| ggwave Ultrasound ×3 | 15–19 kHz | as above | 2.8 / 2.1 / 1.4 s | same, above hearing |
+| ggwave Dual-tone ×3 | about 1–3 kHz | | 6.6 / 4.7 / 2.7 s | tiny speakers |
+
+ggwave's mono-tone protocols are not offered because they only work with fixed-length
+payloads.
 
 ## On the screen
 
 - **Listening** switch, a live mic level in dBFS, and the capture source it managed to open
   (`UNPROCESSED`, `VOICE_RECOGNITION` or `MIC`).
-- **Message** box with a byte counter. Send greys out above 100 bytes.
-- **Protocol** dropdown and a **Tx amplitude** slider (ggwave's `volume`, 5–100, default 30).
+- **Message** box with a byte counter and, for Sotto protocols, the seconds of audio the
+  draft will take. Send greys out above 100 bytes.
+- **Protocol** dropdown and a **Tx amplitude** slider (default 90; ggwave protocols are
+  capped at 25 so their six-tone sum does not clip).
 - **Test burst**: a fixed 20-byte message ten times, 2 s apart. The receiving phone counts
-  `received / 10` so distance and protocol can be scored in one number.
+  `received / 10`, so distance, room and modem can be scored in one number.
 - **Log**: time, direction, protocol, size, text. Newest first.
 - A red banner when media volume is under 70%, with a button that opens the volume panel.
 - A blocking screen if the microphone permission is refused, with a way into app settings.
@@ -92,65 +160,66 @@ echo "sdk.dir=$HOME/Android/Sdk" > local.properties
 adb install -r app/build/outputs/apk/debug/app-debug.apk    # once per phone
 ```
 
-The debug key signs the APK, so later builds install over the top.
+The debug key signs the APK, so later builds install over the top. The host benchmark and
+the artwork tools build with plain `g++`; the commands are in their headers.
 
 ## Range test
 
 1. Install on phone A and phone B. Open the app on both, allow the microphone.
 2. Media volume to at least 70% on both. The red banner goes away.
 3. Turn on **Listening** on B. Talk; the level meter should move.
-4. On A, type something and tap **Send**. Within about two seconds B's log shows the text,
+4. On A, type something and tap **Send**. Within about a second B's log shows the text,
    the time, the protocol and the byte count. Reply from B to A to check the other direction.
-5. Now score it. On B tap **Reset** under "Received". On A pick a protocol and tap
-   **Send burst**. Forty-five seconds later B shows `n / 10`. Walk apart, repeat. Change
-   protocol, repeat. Write the numbers down; they are the whole point of the exercise.
-6. `adb logcat -s sotto-jni SoundLink` shows which capture source was opened, which audio
-   effects were switched off, and anything ggwave refused.
+5. Now score it. On B tap **Reset** under "Received". On A tap **Send burst**. Half a minute
+   later B shows `n / 10`. Switch A to **ggwave Fast** and send the burst again from the same
+   spot. Walk apart, repeat both. Write the numbers down; they are the whole point.
+6. `adb logcat -s sotto-jni SoundLink` shows the capture source, which audio effects were
+   switched off, every sync the modem found, and why any frame was dropped (header, parity
+   with the erasure count, or CRC).
 
 Things that hurt: a case over the mic, a Bluetooth speaker or headset stealing the output on
-the sending phone, "Fastest" in a reverberant room, and ultrasound on hardware that rolls off
-before 19 kHz.
+the sending phone, and ultrasound on hardware that rolls off before 18 kHz.
 
 ## Under the hood
 
-- **ggwave's C++ class, not its C API.** The C functions cannot say which protocol decoded a
-  message; `rxProtocolId()` can. The wrapper is 150 lines in `app/src/main/cpp/ggwave_jni.cpp`.
-- **Two ggwave instances.** One TX-only for the transmit thread, one RX-only for the capture
-  thread. Neither touches the other's buffers, so there are no locks.
+- **One engine, two modems.** `cpp/jni_bridge.cpp` encodes with whichever protocol was
+  chosen and feeds every decoder the same capture stream. ggwave is driven through its C++
+  class rather than its C API because only the class reports which protocol decoded.
 - **`UNPROCESSED` only when the device says so.** Android substitutes a processed source on
   phones that lack it, which is worse than falling back to `VOICE_RECOGNITION` deliberately.
   Echo cancellation, noise suppression and automatic gain control are then disabled by name
-  on the capture session wherever the device reports them, and the effect objects are held
-  until capture stops so the setting cannot revert.
-- **Nothing is resampled.** Capture, playback and ggwave's operating rate are all 48 kHz.
-- **The decoder is always optimised.** The FFT runs on every 1024-sample frame, so the
-  vendored ggwave is compiled with `-O2` even in the debug variant.
-- **Amplitude is per tone.** ggwave sums up to six tones, so a `volume` above about 50 clips.
-  Clipping mostly survives on the audible protocols and is worth trying at range; it is not
-  kind to ultrasound.
-- **The artwork is data.** `tools/dumpwave.cpp` writes the waveform ggwave generates for a
-  message; `tools/hero.py` draws it as run-length merged SVG rectangles from a rectangular
-  window FFT, which is exact here because ggwave's tones sit on FFT bin centres.
+  on the capture session, and the effect objects are held until capture stops.
+- **Nothing is resampled.** Capture, playback and both modems run at 48 kHz.
+- **Rectangular windows on purpose.** Tones sit exactly on FFT bin centres, so a rectangular
+  window over one symbol gives one clean bin per tone; the receiver's FFT is a real-input
+  N/2 transform with the split done only for the 128 bins of the band.
+- **Everything native is compiled `-O2`** even in the debug variant. The decoders run on the
+  capture thread on every frame.
+- **The artwork is data.** `tools/dumpwave.cpp` writes the waveform a modem generates for a
+  message; `tools/hero.py` draws it as run-length merged SVG rectangles.
 
 ## Status
 
-v0. `./gradlew assembleDebug` builds; a host round trip of the wrapper's exact ggwave usage
-decodes 27 of 27 cases (nine protocols, three payload sizes, correct protocol id each time).
+v0.2. Builds. The modem decodes 21 of 21 payload sizes in a clean host round trip and the
+table above in the simulated room. ggwave's wrapper passes the same 27-case round trip.
 Numbers from two real phones at real distances are the next thing this README should contain.
 
 ## Layout
 
 ```
-app/src/main/cpp/ggwave_jni.cpp              JNI wrapper: create, encode, decode, protocol names
+app/src/main/cpp/sotto_modem.h, .cpp         the modem: encoder and streaming decoder
+app/src/main/cpp/jni_bridge.cpp              JNI: create, encode, decode, protocol names
 app/src/main/cpp/ggwave/                     vendored ggwave, commit in VENDORED.md, MIT
-app/src/main/java/com/sotto/GgWave.kt        Kotlin face over the wrapper
+app/src/main/java/com/sotto/Modem.kt         Kotlin face over the engine
 app/src/main/java/com/sotto/SoundLink.kt     AudioRecord, AudioTrack, half-duplex gate
 app/src/main/java/com/sotto/MainViewModel.kt UI state, send, burst counting, log
 app/src/main/java/com/sotto/MainActivity.kt  Compose screens and the permission gate
-tools/                                       waveform dumper and the README artwork generator
+tools/bench.cpp                              the channel simulation and the tables above
+tools/dumpwave.cpp, hero.py                  the README artwork
 docs/                                        the generated SVGs
 ```
 
+The modem reuses the Reed–Solomon implementation vendored with ggwave (Mike Lubinets, MIT).
 ggwave is by Georgi Gerganov, MIT licensed, vendored unchanged at the commit named in
 `app/src/main/cpp/ggwave/VENDORED.md`.
 
