@@ -130,6 +130,7 @@ class IdentityStore(context: Context) {
  *   HERE   A9 | idHi idLo                                     presence, when a phone has been quiet
  *   KEY    AB | fromHi fromLo | toHi toLo | x25519 public key (32)
  *   PRIV   AC | fromHi fromLo | toHi toLo | seq | hopsLeft | counter (4) | AES-GCM sealed text
+ *   ACK    AD | fromHi fromLo | toHi toLo | seq | hopsLeft            "got your message seq"
  */
 object Wire {
     private const val TAG_TEXT = 0xA1
@@ -138,6 +139,7 @@ object Wire {
     private const val TAG_HERE = 0xA9
     private const val TAG_KEY = 0xAB
     private const val TAG_PRIVATE = 0xAC
+    private const val TAG_ACK = 0xAD
 
     sealed class Parsed {
         class Text(val id: Int, val seq: Int, val hops: Int, val text: String, val via: Int?) : Parsed()
@@ -145,6 +147,7 @@ object Wire {
         class Here(val id: Int) : Parsed()
         class Key(val from: Int, val to: Int, val publicKey: ByteArray) : Parsed()
         class Private(val from: Int, val to: Int, val seq: Int, val hops: Int, val counter: Int, val sealed: ByteArray, val raw: ByteArray) : Parsed()
+        class Ack(val from: Int, val to: Int, val seq: Int, val hops: Int, val raw: ByteArray) : Parsed()
         class Plain(val text: String) : Parsed()
     }
 
@@ -159,6 +162,11 @@ object Wire {
 
     /** The same private frame with one hop fewer, for relays that cannot read it. */
     fun relayPrivate(raw: ByteArray): ByteArray = raw.copyOf().also { it[6] = (it[6] - 1).toByte() }
+
+    fun ack(from: Int, to: Int, seq: Int, hops: Int): ByteArray =
+        byteArrayOf(TAG_ACK.toByte(), (from shr 8).toByte(), from.toByte(), (to shr 8).toByte(), to.toByte(), seq.toByte(), hops.toByte())
+
+    fun relayAck(raw: ByteArray): ByteArray = raw.copyOf().also { it[6] = (it[6] - 1).toByte() }
 
     fun here(id: Int): ByteArray = byteArrayOf(TAG_HERE.toByte(), (id shr 8).toByte(), id.toByte())
 
@@ -186,6 +194,7 @@ object Wire {
                 TAG_HELLO -> return Parsed.Hello(id, String(p, 3, p.size - 3, Charsets.UTF_8).trim())
                 TAG_HERE -> return Parsed.Here(id)
                 TAG_KEY -> if (p.size == 5 + 32) return Parsed.Key(id, u16(p, 3), p.copyOfRange(5, 37))
+                TAG_ACK -> if (p.size == 7) return Parsed.Ack(id, u16(p, 3), p[5].toInt() and 0xFF, p[6].toInt() and 0xFF, p)
                 TAG_PRIVATE -> if (p.size >= 11) return Parsed.Private(
                     id, u16(p, 3), p[5].toInt() and 0xFF, p[6].toInt() and 0xFF,
                     ((p[7].toInt() and 0xFF) shl 24) or ((p[8].toInt() and 0xFF) shl 16) or ((p[9].toInt() and 0xFF) shl 8) or (p[10].toInt() and 0xFF),

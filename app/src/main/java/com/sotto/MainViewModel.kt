@@ -44,13 +44,17 @@ class LogEntry(
     val via: Int? = null,
     /** The other person of a private chat; null for the room. */
     val peer: Int? = null,
+    /** Sequence number of a sent private message, until its receipt arrives. */
+    val seq: Int? = null,
+    val delivered: Boolean = false,
 ) {
     enum class Kind { RX, TX, INFO }
 
     fun with(
         text: String = this.text, image: Bitmap? = this.image, progress: String? = this.progress,
         bytes: Int = this.bytes, fraction: Float? = this.fraction, senderId: Int? = this.senderId, via: Int? = this.via,
-    ) = LogEntry(id, time, kind, text, protocol, bytes, image, progress, fraction, senderId, via, peer)
+        delivered: Boolean = this.delivered,
+    ) = LogEntry(id, time, kind, text, protocol, bytes, image, progress, fraction, senderId, via, peer, seq, delivered)
 }
 
 /** Owns the [SoundLink] and exposes everything the UI shows as Compose state. */
@@ -332,12 +336,13 @@ class MainViewModel(app: Application) : AndroidViewModel(app), SoundLink.Callbac
         if (!canSend) return
         val text = draft
         val peer = openChat
+        val seq = identity.nextSeq()
         val bytes = if (peer == null) {
-            Wire.text(identity.id, identity.nextSeq(), HOP_BUDGET, text)
+            Wire.text(identity.id, seq, HOP_BUDGET, text)
         } else {
             val key = identity.peerKeys[peer] ?: run { status = "Still waiting for ${identity.nameFor(peer)}'s key."; sendKey(peer); return }
             val ctr = identity.nextCounter(peer)
-            Wire.private(identity.id, peer, identity.nextSeq(), HOP_BUDGET, ctr, Crypto.encrypt(key, identity.id, peer, ctr, text.toByteArray(Charsets.UTF_8)))
+            Wire.private(identity.id, peer, seq, HOP_BUDGET, ctr, Crypto.encrypt(key, identity.id, peer, ctr, text.toByteArray(Charsets.UTF_8)))
         }
         val pid = textProtocolId
         val vol = effectiveVolumeFor(pid)
@@ -345,7 +350,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app), SoundLink.Callbac
         link.post {
             val ok = link.transmit(bytes, pid, vol)
             main.post {
-                if (ok) { addLog(LogEntry.Kind.TX, text, pid, bytes.size, peer = peer); if (draft == text) draft = "" }
+                if (ok) { addLog(LogEntry.Kind.TX, text, pid, bytes.size, peer = peer, seq = if (peer != null) seq else null); if (draft == text) draft = "" }
                 else status = "${Modem.protocolName(pid)} refused to encode ${bytes.size} bytes"
             }
         }
@@ -431,6 +436,21 @@ class MainViewModel(app: Application) : AndroidViewModel(app), SoundLink.Callbac
                 is Wire.Parsed.Here -> {
                     if (m.id != identity.id) noteSender(m.id, protocolId)
                 }
+                is Wire.Parsed.Ack -> {
+                    if (m.from == identity.id) return@post
+                    val key = seenKey(m.from, m.seq, transfer = false, ack = true)
+                    if (markSeen(key)) { pendingRelays[key]?.set(true); return@post }
+                    noteSender(m.from, protocolId)
+                    // the target has it: any repeat of the message itself still pending here is pointless
+                    pendingRelays[seenKey(m.to, m.seq, transfer = false)]?.set(true)
+                    if (m.to == identity.id) {
+                        Log.i(TAG, "receipt from ${IdentityStore.tagOf(m.from)} for seq ${m.seq}")
+                        val i = log.indexOfFirst { it.kind == LogEntry.Kind.TX && it.peer == m.from && it.seq == m.seq }
+                        if (i >= 0) log[i] = log[i].with(delivered = true)
+                    } else if (relayForOthers && m.hops > 0) {
+                        scheduleRelay(key, Wire.relayAck(m.raw), protocolId)
+                    }
+                }
                 is Wire.Parsed.Key -> {
                     if (m.from == identity.id) return@post
                     noteSender(m.from, protocolId)
@@ -458,6 +478,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app), SoundLink.Callbac
                             addLog(LogEntry.Kind.RX, text, protocolId, payload.size, senderId = m.from, peer = m.from)
                             if (openChat != m.from) unread[m.from] = (unread[m.from] ?: 0) + 1
                             notifyMessage("${identity.nameFor(m.from)} · private", text, m.from)
+                            sendAck(m.from, m.seq, protocolId)
                         }
                     } else if (relayForOthers && m.hops > 0) {
                         scheduleRelay(key, Wire.relayPrivate(m.raw), protocolId)   // not for us: repeat it unread
@@ -494,6 +515,13 @@ class MainViewModel(app: Application) : AndroidViewModel(app), SoundLink.Callbac
         link.post { SystemClock.sleep(wait); link.transmit(frame, pid, vol) }
     }
 
+    /** "Got it": a seven-byte receipt to the sender of a private message, after a short pause. */
+    private fun sendAck(to: Int, seq: Int, protocolId: Int) {
+        val frame = Wire.ack(identity.id, to, seq, HOP_BUDGET)
+        val vol = effectiveVolumeFor(protocolId)
+        link.post { SystemClock.sleep(REPLY_DELAY_MS + Random.nextLong(0, 400)); link.waitUntilQuiet(RELAY_QUIET_WAIT_MS); link.transmit(frame, protocolId, vol) }
+    }
+
     /** Plays our public key for [peer], at most once a minute; they answer with theirs. */
     private fun sendKey(peer: Int) {
         if (!cryptoOk) return
@@ -514,7 +542,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app), SoundLink.Callbac
 
     // ---- relaying ------------------------------------------------------------------------
 
-    private fun seenKey(sender: Int, seq: Int, transfer: Boolean) = (sender shl 9) or (seq shl 1) or (if (transfer) 1 else 0)
+    private fun seenKey(sender: Int, seq: Int, transfer: Boolean, ack: Boolean = false) = (sender shl 10) or (seq shl 2) or (if (transfer) 1 else 0) or (if (ack) 2 else 0)
 
     /** Records the key; true if it had been heard within the last few minutes already. */
     private fun markSeen(key: Int): Boolean {
@@ -759,9 +787,9 @@ class MainViewModel(app: Application) : AndroidViewModel(app), SoundLink.Callbac
 
     // ---- helpers ------------------------------------------------------------------------
 
-    private fun addLog(kind: LogEntry.Kind, text: String, protocolId: Int, bytes: Int, image: Bitmap? = null, progress: String? = null, fraction: Float? = null, senderId: Int? = null, via: Int? = null, peer: Int? = null): Long {
+    private fun addLog(kind: LogEntry.Kind, text: String, protocolId: Int, bytes: Int, image: Bitmap? = null, progress: String? = null, fraction: Float? = null, senderId: Int? = null, via: Int? = null, peer: Int? = null, seq: Int? = null): Long {
         val id = nextLogId++
-        log.add(0, LogEntry(id, clock.format(Date()), kind, text, Modem.protocolName(protocolId), bytes, image, progress, fraction, senderId, via, peer))
+        log.add(0, LogEntry(id, clock.format(Date()), kind, text, Modem.protocolName(protocolId), bytes, image, progress, fraction, senderId, via, peer, seq))
         while (log.size > MAX_LOG) log.removeAt(log.size - 1)
         return id
     }

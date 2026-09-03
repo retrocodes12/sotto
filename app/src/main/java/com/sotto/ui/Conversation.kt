@@ -243,6 +243,7 @@ private fun MessageTile(e: LogEntry, sender: String?, via: String?) {
         val caption = buildString {
             append(e.time.substring(0, 5))
             if (e.peer != null) append(" · private")
+            if (e.kind == LogEntry.Kind.TX && e.peer != null) append(if (e.delivered) " · delivered" else " · sent")
             via?.let { append(" · via "); append(it) }
             e.progress?.let { append(" · "); append(it) } ?: run {
                 if (e.bytes > 0) { append(" · "); append(if (e.bytes >= 1000) "%.1f KB".format(e.bytes / 1000f) else "${e.bytes} B") }
