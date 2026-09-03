@@ -87,7 +87,7 @@ fun ConversationScreen(vm: MainViewModel) {
                     contentPadding = PaddingValues(horizontal = 16.dp, vertical = 12.dp),
                     verticalArrangement = Arrangement.spacedBy(10.dp),
                 ) {
-                    items(vm.log, key = { it.id }) { MessageTile(it) }
+                    items(vm.log, key = { it.id }) { MessageTile(it, vm.identity.nameFor(it.senderId)) }
                 }
             }
             vm.status?.let { Note(it, error = true) }
@@ -141,7 +141,7 @@ private fun EmptyState(modifier: Modifier) {
 }
 
 @Composable
-private fun MessageTile(e: LogEntry) {
+private fun MessageTile(e: LogEntry, sender: String?) {
     if (e.kind == LogEntry.Kind.INFO) { Note(e.text); return }
     val out = e.kind == LogEntry.Kind.TX
     val tile = if (out) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceVariant
@@ -151,6 +151,9 @@ private fun MessageTile(e: LogEntry) {
         bottomStart = if (out) 18.dp else 6.dp, bottomEnd = if (out) 6.dp else 18.dp,
     )
     Column(Modifier.fillMaxWidth(), horizontalAlignment = if (out) Alignment.End else Alignment.Start) {
+        if (!out && sender != null) {
+            Text(sender, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(start = 4.dp, bottom = 3.dp))
+        }
         Surface(color = tile, shape = shape, modifier = Modifier.widthIn(max = 300.dp)) {
             Column(Modifier.padding(if (e.image != null) 6.dp else 12.dp)) {
                 e.image?.let { bmp ->

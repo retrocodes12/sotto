@@ -35,13 +35,14 @@ class LogEntry(
     val image: Bitmap? = null,
     val progress: String? = null,
     val fraction: Float? = null,
+    val senderId: Int? = null,
 ) {
     enum class Kind { RX, TX, INFO }
 
     fun with(
         text: String = this.text, image: Bitmap? = this.image, progress: String? = this.progress,
-        bytes: Int = this.bytes, fraction: Float? = this.fraction,
-    ) = LogEntry(id, time, kind, text, protocol, bytes, image, progress, fraction)
+        bytes: Int = this.bytes, fraction: Float? = this.fraction, senderId: Int? = this.senderId,
+    ) = LogEntry(id, time, kind, text, protocol, bytes, image, progress, fraction, senderId)
 }
 
 /** Owns the [SoundLink] and exposes everything the UI shows as Compose state. */
@@ -49,6 +50,8 @@ class MainViewModel(app: Application) : AndroidViewModel(app), SoundLink.Callbac
 
     private val main = Handler(Looper.getMainLooper())
     private val link = SoundLink(app, this)
+    val identity = IdentityStore(app)
+    private val helloSentAt = HashMap<Int, Long>()
     private val clock = SimpleDateFormat("HH:mm:ss", Locale.US)
 
     /** What the user asked for. The switch reflects this; [captureSource] says whether it is up. */
@@ -210,7 +213,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app), SoundLink.Callbac
     fun send() {
         if (!canSend) return
         val text = draft
-        val bytes = text.toByteArray(Charsets.UTF_8)
+        val bytes = Wire.text(identity.id, text)
         val pid = textProtocolId
         val vol = effectiveVolumeFor(pid)
         status = null
@@ -277,11 +280,66 @@ class MainViewModel(app: Application) : AndroidViewModel(app), SoundLink.Callbac
                 Transfer.parse(payload)?.let { onTransferFrame(it, protocolId) }
                 return@post
             }
-            val text = String(payload, Charsets.UTF_8)
-            Log.i(TAG, "rx ${Modem.protocolName(protocolId)} ${payload.size} B: $text")
-            trackBurst(text)
-            addLog(LogEntry.Kind.RX, text, protocolId, payload.size)
+            when (val m = Wire.parse(payload)) {
+                is Wire.Parsed.Text -> {
+                    Log.i(TAG, "rx ${Modem.protocolName(protocolId)} ${payload.size} B from ${IdentityStore.tagOf(m.id)}: ${m.text}")
+                    noteSender(m.id, protocolId)
+                    trackBurst(m.text)
+                    addLog(LogEntry.Kind.RX, m.text, protocolId, payload.size, senderId = m.id)
+                }
+                is Wire.Parsed.Hello -> {
+                    Log.i(TAG, "rx hello from ${IdentityStore.tagOf(m.id)}: ${m.name}")
+                    val known = identity.contacts[m.id]?.name?.isNotEmpty() == true
+                    identity.heard(m.id, m.name.ifEmpty { null })
+                    if (!known) addLog(LogEntry.Kind.INFO, "${identity.nameFor(m.id)} is here", protocolId, 0)
+                    sendHello(m.id, protocolId)
+                }
+                is Wire.Parsed.Plain -> {
+                    Log.i(TAG, "rx ${Modem.protocolName(protocolId)} ${payload.size} B plain: ${m.text}")
+                    trackBurst(m.text)
+                    addLog(LogEntry.Kind.RX, m.text, protocolId, payload.size)
+                }
+            }
         }
+    }
+
+    // ---- identity ------------------------------------------------------------------------
+
+    /** A frame from [id] arrived. Unknown senders get our name, which invites theirs. */
+    private fun noteSender(id: Int, protocolId: Int) {
+        val known = identity.contacts[id]?.name?.isNotEmpty() == true
+        identity.heard(id)
+        if (!known) sendHello(id, protocolId)
+    }
+
+    /** Plays our name for [forId], at most once a minute per phone, after a short pause. */
+    private fun sendHello(forId: Int, protocolId: Int) {
+        if (identity.name.isEmpty()) return
+        val now = SystemClock.elapsedRealtime()
+        if (now - (helloSentAt[forId] ?: 0L) < HELLO_EVERY_MS) return
+        helloSentAt[forId] = now
+        val frame = Wire.hello(identity.id, identity.name)
+        val pid = protocolId
+        val vol = effectiveVolumeFor(pid)
+        val wait = REPLY_DELAY_MS + Random.nextLong(0, 900)
+        link.post { SystemClock.sleep(wait); link.transmit(frame, pid, vol) }
+    }
+
+    /** Settings: a new name is announced to everyone we know next time they speak. */
+    fun setName(name: String) {
+        identity.rename(name)
+        helloSentAt.clear()
+    }
+
+    /** Introduce this phone now, on the text protocol. */
+    fun sayHello() {
+        if (identity.name.isEmpty() || busy) return
+        helloSentAt.clear()
+        val frame = Wire.hello(identity.id, identity.name)
+        val pid = textProtocolId
+        val vol = effectiveVolumeFor(pid)
+        link.post { link.transmit(frame, pid, vol) }
+        addLog(LogEntry.Kind.INFO, "You said hello as ${identity.name} ${identity.tag}", pid, 0)
     }
 
     // ---- transfers: receiving ----------------------------------------------------------
@@ -338,8 +396,10 @@ class MainViewModel(app: Application) : AndroidViewModel(app), SoundLink.Callbac
             updateLog(x.logId) { it.with(text = "transfer failed to assemble", progress = null) }
             return
         }
-        val (kind, content) = assembled
-        Log.i(TAG, "transfer ${x.id} complete: kind $kind, ${content.size} B")
+        val kind = assembled.kind
+        val content = assembled.content
+        Log.i(TAG, "transfer ${x.id} complete: kind $kind, ${content.size} B, from ${IdentityStore.tagOf(assembled.sender)}")
+        if (assembled.sender != 0) { noteSender(assembled.sender, protocolId); updateLog(x.logId) { it.with(senderId = assembled.sender) } }
         when (kind) {
             Transfer.KIND_JPEG -> {
                 val bmp = BitmapFactory.decodeByteArray(content, 0, content.size)
@@ -385,7 +445,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app), SoundLink.Callbac
     private fun startTransfer(kind: Int, content: ByteArray, label: String, preview: Bitmap?) {
         val pid = photoProtocolId
         val id = Random.nextInt(256)
-        val chunks = Transfer.chunks(id, kind, content)
+        val chunks = Transfer.chunks(id, kind, identity.id, content)
         if (chunks == null) { status = "Too large to send (${content.size} B)"; return }
         val vol = effectiveVolumeFor(pid)
         val perChunk = Modem.airtime(pid, Transfer.MAX_FRAME) ?: 3f
@@ -468,9 +528,9 @@ class MainViewModel(app: Application) : AndroidViewModel(app), SoundLink.Callbac
 
     // ---- helpers ------------------------------------------------------------------------
 
-    private fun addLog(kind: LogEntry.Kind, text: String, protocolId: Int, bytes: Int, image: Bitmap? = null, progress: String? = null, fraction: Float? = null): Long {
+    private fun addLog(kind: LogEntry.Kind, text: String, protocolId: Int, bytes: Int, image: Bitmap? = null, progress: String? = null, fraction: Float? = null, senderId: Int? = null): Long {
         val id = nextLogId++
-        log.add(0, LogEntry(id, clock.format(Date()), kind, text, Modem.protocolName(protocolId), bytes, image, progress, fraction))
+        log.add(0, LogEntry(id, clock.format(Date()), kind, text, Modem.protocolName(protocolId), bytes, image, progress, fraction, senderId))
         while (log.size > MAX_LOG) log.removeAt(log.size - 1)
         return id
     }
@@ -518,6 +578,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app), SoundLink.Callbac
         private const val END_ATTEMPTS = 2
         private const val MAX_ROUNDS = 6
         private const val UPDATE_CHECK_EVERY_MS = 6 * 60 * 60 * 1000L
+        private const val HELLO_EVERY_MS = 60_000L
         private const val MAX_LOG = 200
         private val BURST_REGEX = Regex("^TB(\\d\\d)/(\\d\\d):")
 

@@ -27,6 +27,7 @@ import androidx.lifecycle.compose.LifecycleResumeEffect
 import androidx.lifecycle.compose.LifecycleStartEffect
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.sotto.ui.ConversationScreen
+import com.sotto.ui.NameScreen
 import com.sotto.ui.SottoTheme
 import com.sotto.ui.WelcomeScreen
 
@@ -60,7 +61,9 @@ fun SottoApp(vm: MainViewModel = viewModel()) {
     }
 
     Box(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)) {
-        if (granted) {
+        if (granted && vm.identity.name.isEmpty()) {
+            NameScreen(tag = vm.identity.tag, onDone = { vm.setName(it) })
+        } else if (granted) {
             ConversationScreen(vm)
         } else {
             WelcomeScreen(

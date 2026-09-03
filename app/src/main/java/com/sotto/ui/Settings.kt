@@ -14,6 +14,14 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
+import androidx.compose.material3.TextField
+import androidx.compose.material3.TextFieldDefaults
+import androidx.compose.ui.graphics.Color
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
@@ -50,6 +58,51 @@ fun SettingsSheet(vm: MainViewModel, onDismiss: () -> Unit) {
         Column(Modifier.verticalScroll(rememberScrollState()).padding(horizontal = 24.dp).padding(bottom = 32.dp)) {
             Text("Settings", style = MaterialTheme.typography.displayMedium)
             Spacer(Modifier.height(20.dp))
+
+            Caps("You")
+            var nameDraft by remember { mutableStateOf(vm.identity.name) }
+            val focus = LocalFocusManager.current
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                TextField(
+                    value = nameDraft, onValueChange = { if (it.toByteArray().size <= 24) nameDraft = it },
+                    modifier = Modifier.weight(1f), singleLine = true,
+                    textStyle = MaterialTheme.typography.titleMedium, shape = RoundedCornerShape(14.dp),
+                    keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
+                    keyboardActions = KeyboardActions(onDone = { vm.setName(nameDraft); focus.clearFocus() }),
+                    colors = TextFieldDefaults.colors(
+                        focusedContainerColor = MaterialTheme.colorScheme.surfaceVariant, unfocusedContainerColor = MaterialTheme.colorScheme.surfaceVariant,
+                        focusedIndicatorColor = Color.Transparent, unfocusedIndicatorColor = Color.Transparent, cursorColor = MaterialTheme.colorScheme.onSurface,
+                    ),
+                )
+                Spacer(Modifier.width(12.dp))
+                Text(vm.identity.tag, style = MaterialTheme.typography.titleMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+            if (nameDraft.trim() != vm.identity.name) {
+                TextButton(onClick = { vm.setName(nameDraft); focus.clearFocus() }, contentPadding = androidx.compose.foundation.layout.PaddingValues(0.dp)) {
+                    Text("Save name", color = MaterialTheme.colorScheme.onBackground, fontWeight = FontWeight.SemiBold)
+                }
+            }
+            Text(
+                "Others see your name over your messages. The tag never changes. Say hello to introduce this phone to anyone listening.",
+                style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(top = 6.dp),
+            )
+            Row(Modifier.padding(top = 6.dp), verticalAlignment = Alignment.CenterVertically) {
+                OutlinedButton(onClick = { vm.sayHello() }, enabled = !vm.busy && vm.identity.name.isNotEmpty()) { Text("Say hello", color = MaterialTheme.colorScheme.onBackground) }
+            }
+            val people = vm.identity.contacts.entries.sortedByDescending { it.value.lastHeard }
+            if (people.isNotEmpty()) {
+                Spacer(Modifier.height(12.dp))
+                Caps("Heard")
+                for ((id, c) in people) {
+                    Row(Modifier.padding(vertical = 3.dp), verticalAlignment = Alignment.CenterVertically) {
+                        Text(c.name.ifEmpty { "someone" }, style = MaterialTheme.typography.bodyMedium, modifier = Modifier.weight(1f))
+                        Text(com.sotto.IdentityStore.tagOf(id), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        Spacer(Modifier.width(12.dp))
+                        Text(ago(c.lastHeard), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
+                }
+            }
+            Rule()
 
             SwitchRow("Listening", if (vm.captureSource != null) "Mic on, ${vm.captureSource}" else "Off. Nothing arrives while off.", vm.wantListening) { vm.setListening(it) }
             Rule()
@@ -185,4 +238,14 @@ private fun Caps(text: String) {
 @Composable
 private fun Rule() {
     HorizontalDivider(Modifier.padding(vertical = 18.dp), color = MaterialTheme.colorScheme.outline)
+}
+
+private fun ago(t: Long): String {
+    val s = (System.currentTimeMillis() - t) / 1000
+    return when {
+        s < 60 -> "just now"
+        s < 3600 -> "${s / 60} min ago"
+        s < 86400 -> "${s / 3600} h ago"
+        else -> "${s / 86400} d ago"
+    }
 }
