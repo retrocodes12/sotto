@@ -64,12 +64,18 @@ class MainViewModel(app: Application) : AndroidViewModel(app), SoundLink.Callbac
     var transmitting by mutableStateOf(false)
         private set
     var protocolId by mutableIntStateOf(Modem.DEFAULT_PROTOCOL_ID)
-    /** Auto: Fast for text, Near for photos. Off: whatever [protocolId] says, for everything. */
+    /** Auto: silent ultrasound (or Fast) for text, Near for photos. Off: [protocolId] for everything. */
     var autoProtocol by mutableStateOf(true)
+    /** The point of the app: messages nobody can hear. Off trades silence for range. */
+    var silentText by mutableStateOf(true)
     var txVolume by mutableIntStateOf(DEFAULT_TX_VOLUME)
 
-    val textProtocolId: Int get() = if (autoProtocol) Modem.DEFAULT_PROTOCOL_ID else protocolId
+    val textProtocolId: Int
+        get() = if (!autoProtocol) protocolId else if (silentText) Modem.ULTRASOUND_PROTOCOL_ID else Modem.DEFAULT_PROTOCOL_ID
     val photoProtocolId: Int get() = if (autoProtocol) Modem.NEAR_PROTOCOL_ID else protocolId
+
+    /** Seconds of audio the current draft would take. */
+    val draftSeconds: Float? get() = if (draftBytes == 0) null else Modem.airtime(textProtocolId, draftBytes + 3)
     var draft by mutableStateOf("")
     var mediaVolume by mutableFloatStateOf(1f)
         private set

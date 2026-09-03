@@ -129,9 +129,9 @@ one. The log tells you which protocol each message arrived on.
 
 | Protocol | Band | Symbol | 20 bytes | Reach for it when |
 |---|---|---|---|---|
-| **Sotto Fast** (default) | 2.1–8.0 kHz | 21 ms | 1.22 s | most of the time |
+| Sotto Fast | 2.1–8.0 kHz | 21 ms | 1.22 s | range in the audible band; the "Silent messages" switch off |
 | Sotto Robust | 2.1–8.0 kHz, tones 47 Hz apart | 43 ms | 2.43 s | far apart, loud room, or someone is walking |
-| Sotto Ultrasound | 18–19.5 kHz, 16 tones, rate-½ parity | 43 ms, 4 bits | 4.4 s | it must be silent to adults. Band tuned on one phone pair; see below |
+| **Sotto Ultrasound** (default for messages) | 18–19.5 kHz, 16 tones, rate-½ parity | 43 ms, 4 bits | 4.4 s | nobody hears it. Band tuned on one phone pair; see below |
 | ggwave Normal / Fast / Fastest | 1.8–6.2 kHz | 192 / 128 / 64 ms chunks | 2.8 / 2.1 / 1.4 s | comparison, and talking to other ggwave software |
 | ggwave Ultrasound ×3 | 15–19 kHz | as above | 2.8 / 2.1 / 1.4 s | same, above hearing |
 | ggwave Dual-tone ×3 | about 1–3 kHz | | 6.6 / 4.7 / 2.7 s | tiny speakers |
@@ -145,8 +145,10 @@ payloads.
   (`UNPROCESSED`, `VOICE_RECOGNITION` or `MIC`).
 - **Message** box with a byte counter and, for Sotto protocols, the seconds of audio the
   draft will take. Send greys out above 100 bytes.
-- **Protocol** dropdown and a **Tx amplitude** slider (default 100; ggwave protocols are
-  capped at 25 so their six-tone sum does not clip).
+- **Silent messages** on by default: text goes on ultrasound, photos on Near (audible, at
+  arm's length). Settings can switch messages to the audible Fast band for range, or pin
+  any protocol for everything. Loudness slider defaults to full; ggwave protocols are
+  capped at 25 so their six-tone sum does not clip.
 - **Test burst**: a fixed 20-byte message ten times, 2 s apart. The receiving phone counts
   `received / 10`, so distance, room and modem can be scored in one number.
 - **Log**: time, direction, protocol, size, text. Newest first.

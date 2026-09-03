@@ -39,8 +39,8 @@ fun WelcomeScreen(denied: Boolean, onRequest: () -> Unit, onOpenSettings: () -> 
             Text("Messages that travel as sound.", style = MaterialTheme.typography.titleLarge, color = MaterialTheme.colorScheme.onBackground)
             Spacer(Modifier.height(16.dp))
             Text(
-                "Type on one phone and it plays a short chirp. Another phone running Sotto hears it and shows the words. " +
-                    "No internet, no account, nothing to pair. Photos work too, at arm's length.",
+                "Type on one phone and it plays a sound too high for people to hear. Another phone running Sotto hears it " +
+                    "and shows the words. No internet, no account, nothing to pair. Photos work too, at arm's length.",
                 style = MaterialTheme.typography.bodyLarge, color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
             Spacer(Modifier.height(16.dp))

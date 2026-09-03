@@ -107,8 +107,23 @@ fun SettingsSheet(vm: MainViewModel, onDismiss: () -> Unit) {
             SwitchRow("Listening", if (vm.captureSource != null) "Mic on, ${vm.captureSource}" else "Off. Nothing arrives while off.", vm.wantListening) { vm.setListening(it) }
             Rule()
 
-            SwitchRow("Choose protocol for me", if (vm.autoProtocol) "Fast for text, Near for photos" else "Everything on ${Modem.protocolName(vm.protocolId)}", vm.autoProtocol) { vm.autoProtocol = it }
-            if (!vm.autoProtocol) {
+            SwitchRow(
+                "Choose protocol for me",
+                if (vm.autoProtocol) "${if (vm.silentText) "Ultrasound" else "Fast"} for messages, Near for photos" else "Everything on ${Modem.protocolName(vm.protocolId)}",
+                vm.autoProtocol,
+            ) { vm.autoProtocol = it }
+            if (vm.autoProtocol) {
+                Spacer(Modifier.height(14.dp))
+                SwitchRow(
+                    "Silent messages",
+                    if (vm.silentText) "18–19.5 kHz, above hearing. About 2 m in a room; 5 bytes take 2 s, 20 bytes 4 s." else "Audible 2–8 kHz band. Farther and faster, but everyone hears the chirp.",
+                    vm.silentText,
+                ) { vm.silentText = it }
+                Text(
+                    "Photos always use Near, which is audible: four tones at once, at arm's length.",
+                    style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(top = 8.dp),
+                )
+            } else {
                 Spacer(Modifier.height(8.dp))
                 ProtocolPicker(vm)
             }

@@ -134,7 +134,7 @@ private fun EmptyState(modifier: Modifier) {
         Text("Nothing yet.", style = MaterialTheme.typography.titleLarge, color = MaterialTheme.colorScheme.onBackground)
         Spacer(Modifier.height(8.dp))
         Text(
-            "Open Sotto on the other phone too. Anything you send plays as sound, and anything it hears shows up here.",
+            "Open Sotto on the other phone too. What you send plays as a sound too high to hear; what this phone hears shows up here.",
             style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant, textAlign = TextAlign.Center,
         )
     }
@@ -226,9 +226,12 @@ private fun ComposeBar(vm: MainViewModel) {
     val pickPhoto = rememberLauncherForActivityResult(ActivityResultContracts.PickVisualMedia()) { uri -> if (uri != null) vm.sendPhoto(uri) }
     val over = vm.draftBytes > MainViewModel.MAX_BYTES
     Column(Modifier.fillMaxWidth().padding(start = 12.dp, end = 12.dp, top = 4.dp, bottom = 12.dp)) {
-        if (vm.draftBytes > 80) {
+        val secs = vm.draftSeconds
+        if (secs != null) {
             Text(
-                "${vm.draftBytes} / ${MainViewModel.MAX_BYTES} bytes",
+                if (over) "${vm.draftBytes} / ${MainViewModel.MAX_BYTES} bytes, too long"
+                else if (vm.draftBytes > 80) "${vm.draftBytes} / ${MainViewModel.MAX_BYTES} bytes · about ${secs.toInt().coerceAtLeast(1)} s"
+                else "about ${secs.toInt().coerceAtLeast(1)} s of sound",
                 style = MaterialTheme.typography.bodySmall,
                 color = if (over) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant,
                 modifier = Modifier.align(Alignment.End).padding(end = 64.dp, bottom = 4.dp),
