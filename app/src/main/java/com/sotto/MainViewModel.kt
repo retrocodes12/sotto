@@ -15,6 +15,8 @@ import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.lifecycle.AndroidViewModel
+import androidx.lifecycle.viewModelScope
+import kotlinx.coroutines.launch
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -87,6 +89,17 @@ class MainViewModel(app: Application) : AndroidViewModel(app), SoundLink.Callbac
 
     private var inForeground = false
 
+    /** Updates from GitHub releases. */
+    var update by mutableStateOf<Updates.Release?>(null)
+        private set
+    var updateChecking by mutableStateOf(false)
+        private set
+    var updateProgress by mutableIntStateOf(-1)   // -1 idle, 0..100 downloading, 100 ready
+        private set
+    var updateNote by mutableStateOf<String?>(null)
+        private set
+    private var lastUpdateCheck = 0L
+
     /** Photo and long-content transfers. */
     var transferring by mutableStateOf(false)
         private set
@@ -137,6 +150,48 @@ class MainViewModel(app: Application) : AndroidViewModel(app), SoundLink.Callbac
     fun onForeground() {
         inForeground = true
         if (wantListening) link.startListening()
+        if (SystemClock.elapsedRealtime() - lastUpdateCheck > UPDATE_CHECK_EVERY_MS) checkForUpdates(manual = false)
+    }
+
+    // ---- updates -------------------------------------------------------------------------
+
+    fun checkForUpdates(manual: Boolean) {
+        if (updateChecking) return
+        updateChecking = true
+        if (manual) updateNote = null
+        lastUpdateCheck = SystemClock.elapsedRealtime()
+        viewModelScope.launch {
+            val r = Updates.latest()
+            updateChecking = false
+            when {
+                r == null -> if (manual) updateNote = "Could not reach the release feed. Try again on Wi-Fi."
+                Updates.isNewer(r.version, BuildConfig.VERSION_NAME) -> {
+                    update = r
+                    if (Updates.cachedApk(getApplication(), r.version) != null) updateProgress = 100
+                }
+                else -> if (manual) updateNote = "You have the latest version."
+            }
+        }
+    }
+
+    /** Downloads the update if needed, then opens the system installer. */
+    fun installUpdate() {
+        val r = update ?: return
+        val app = getApplication<Application>()
+        val cached = Updates.cachedApk(app, r.version)
+        if (cached != null) {
+            if (!Updates.install(app, cached)) updateNote = "Allow Sotto to install updates, then tap again."
+            return
+        }
+        if (updateProgress in 0..99) return
+        updateProgress = 0
+        updateNote = null
+        viewModelScope.launch {
+            val file = Updates.download(app, r) { p -> updateProgress = p }
+            if (file == null) { updateProgress = -1; updateNote = "Download failed. Try again."; return@launch }
+            updateProgress = 100
+            if (!Updates.install(app, file)) updateNote = "Allow Sotto to install updates, then tap again."
+        }
     }
 
     fun onBackground() {
@@ -462,6 +517,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app), SoundLink.Callbac
         private const val MAX_REPLY_ATTEMPTS = 3
         private const val END_ATTEMPTS = 2
         private const val MAX_ROUNDS = 6
+        private const val UPDATE_CHECK_EVERY_MS = 6 * 60 * 60 * 1000L
         private const val MAX_LOG = 200
         private val BURST_REGEX = Regex("^TB(\\d\\d)/(\\d\\d):")
 

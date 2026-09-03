@@ -91,6 +91,7 @@ fun ConversationScreen(vm: MainViewModel) {
                 }
             }
             vm.status?.let { Note(it, error = true) }
+            vm.update?.let { u -> UpdateNudge(u.version, onOpen = { showSettings = true }) }
             if (vm.mediaVolume < 0.7f) VolumeNudge(vm)
             ComposeBar(vm)
         }
@@ -189,6 +190,18 @@ private fun Note(text: String, error: Boolean = false) {
         color = if (error) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant,
         modifier = Modifier.fillMaxWidth().padding(horizontal = 24.dp, vertical = 6.dp),
     )
+}
+
+@Composable
+private fun UpdateNudge(version: String, onOpen: () -> Unit) {
+    Row(
+        Modifier.fillMaxWidth().clickable(onClick = onOpen).padding(horizontal = 20.dp, vertical = 8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text("Sotto $version is out. Both phones should run the same version.", style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.weight(1f))
+        Text("Update", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onBackground)
+    }
 }
 
 @Composable

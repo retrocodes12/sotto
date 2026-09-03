@@ -101,10 +101,37 @@ fun SettingsSheet(vm: MainViewModel, onDismiss: () -> Unit) {
             }
             Rule()
 
-            Text("Sotto ${BuildConfig.VERSION_NAME}", style = MaterialTheme.typography.labelMedium)
+            Caps("Version")
+            val u = vm.update
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Column(Modifier.weight(1f)) {
+                    Text(if (u != null) "Sotto ${u.version} is available" else "Sotto ${BuildConfig.VERSION_NAME}", style = MaterialTheme.typography.titleMedium)
+                    val sub = when {
+                        vm.updateProgress in 0..99 -> "Downloading, ${vm.updateProgress}%"
+                        u != null && vm.updateProgress == 100 -> "Downloaded. Android will ask to confirm the install."
+                        u != null && u.notes.isNotEmpty() -> u.notes
+                        u != null -> "You have ${BuildConfig.VERSION_NAME}."
+                        vm.updateChecking -> "Checking…"
+                        else -> vm.updateNote ?: "Updates come straight from the project's releases."
+                    }
+                    Text(sub, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    if (u != null) vm.updateNote?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error) }
+                }
+                Spacer(Modifier.width(12.dp))
+                if (u != null) {
+                    Button(
+                        onClick = { vm.installUpdate() }, enabled = vm.updateProgress !in 0..99,
+                        colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary, contentColor = MaterialTheme.colorScheme.onPrimary),
+                    ) { Text(if (vm.updateProgress == 100) "Install" else "Update") }
+                } else {
+                    OutlinedButton(onClick = { vm.checkForUpdates(manual = true) }, enabled = !vm.updateChecking) {
+                        Text("Check", color = MaterialTheme.colorScheme.onBackground)
+                    }
+                }
+            }
             Text(
                 "Messages travel as sound between the phones' speakers and microphones. No server, no account, nothing leaves the room.",
-                style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(top = 4.dp),
+                style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(top = 14.dp),
             )
             TextButton(onClick = { context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("https://github.com/retrocodes12/sotto"))) }, contentPadding = androidx.compose.foundation.layout.PaddingValues(0.dp)) {
                 Text("Source and how it works", color = MaterialTheme.colorScheme.onBackground, fontWeight = FontWeight.SemiBold)

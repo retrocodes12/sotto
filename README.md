@@ -157,11 +157,17 @@ payloads.
 ## Install
 
 No toolchain needed to try it: the [latest release](https://github.com/retrocodes12/sotto/releases/latest)
-carries a debug-signed APK. Put it on both phones and open it, or from a computer:
+carries `sotto.apk`. Put it on both phones and open it, or from a computer:
 
 ```sh
-adb install -r sotto-v0.6-debug.apk
+adb install -r sotto.apk
 ```
+
+After that the app updates itself: it checks the project's releases when opened (at most
+every six hours, or on demand in Settings), downloads the new `sotto.apk` into its cache
+and hands it to Android's installer. Every build is signed with the same key, so updates
+install over the top and keep your settings. Both phones should run the same version;
+the app says so when one is behind.
 
 ## Build
 
@@ -256,7 +262,10 @@ app/src/main/cpp/ggwave/                     vendored ggwave, commit in VENDORED
 app/src/main/java/com/sotto/Modem.kt         Kotlin face over the engine
 app/src/main/java/com/sotto/SoundLink.kt     AudioRecord, AudioTrack, half-duplex gate
 app/src/main/java/com/sotto/MainViewModel.kt UI state, send, burst counting, log
-app/src/main/java/com/sotto/MainActivity.kt  Compose screens and the permission gate
+app/src/main/java/com/sotto/MainActivity.kt  permission gate and screen switch
+app/src/main/java/com/sotto/ui/              conversation, welcome and settings screens, theme
+app/src/main/java/com/sotto/Transfer.kt      chunking and resend requests for photos
+app/src/main/java/com/sotto/Updates.kt       in-app updates from GitHub releases
 tools/bench.cpp                              the channel simulation and the tables above
 tools/dumpwave.cpp, hero.py                  the README artwork
 docs/                                        the generated SVGs
