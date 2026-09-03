@@ -28,6 +28,7 @@ import android.os.ParcelUuid
 import android.os.SystemClock
 import android.util.Log
 import androidx.core.content.ContextCompat
+import java.nio.ByteBuffer
 import java.util.UUID
 
 /**
@@ -54,8 +55,8 @@ class BleLink(private val context: Context, private val callbacks: Callbacks) {
     interface Callbacks {
         /** A frame arrived over the radio. Called on the BLE thread. */
         fun onBleFrame(payload: ByteArray)
-        /** An advertisement from [id] was seen, [rssi] dBm. Called on the BLE thread. */
-        fun onBlePresence(id: Int, rssi: Int)
+        /** An advertisement from [id64] (16-bit form [id16]) was seen, [rssi] dBm. BLE thread. */
+        fun onBlePresence(id64: Long, id16: Int, rssi: Int)
         /** Something the user should know: null clears it. */
         fun onBleState(running: Boolean, peers: Int, note: String?)
     }
@@ -65,7 +66,7 @@ class BleLink(private val context: Context, private val callbacks: Callbacks) {
     private val adapterWatcher = object : android.content.BroadcastReceiver() {
         override fun onReceive(c: Context?, intent: android.content.Intent?) {
             when (intent?.getIntExtra(BluetoothAdapter.EXTRA_STATE, -1)) {
-                BluetoothAdapter.STATE_ON -> if (wanted) start(myId)
+                BluetoothAdapter.STATE_ON -> if (wanted) start(myId, myId64)
                 BluetoothAdapter.STATE_TURNING_OFF, BluetoothAdapter.STATE_OFF -> {
                     val wantedBefore = wanted
                     stop()
@@ -83,19 +84,20 @@ class BleLink(private val context: Context, private val callbacks: Callbacks) {
 
     @Volatile private var running = false
     @Volatile private var myId = 0
+    @Volatile private var myId64 = 0L
     private var server: BluetoothGattServer? = null
     private var characteristic: BluetoothGattCharacteristic? = null
 
     /** Peers seen advertising, by their Sotto id. */
-    private val peers = HashMap<Int, Peer>()
+    private val peers = HashMap<Long, Peer>()
     /** Live outbound connections, by device address. */
     private val conns = HashMap<String, Conn>()
     /** Inbound fragments being reassembled, by device address. */
     private val inbox = HashMap<String, Reassembly>()
     /** When each peer's presence was last passed up, so scan results do not flood the app. */
-    private val lastReported = HashMap<Int, Long>()
+    private val lastReported = HashMap<Long, Long>()
 
-    private class Peer(val device: BluetoothDevice, var lastSeen: Long, var rssi: Int)
+    private class Peer(var device: BluetoothDevice, val id64: Long, var lastSeen: Long, var rssi: Int)
 
     private class Reassembly(val total: Int, val msgId: Int) {
         val parts = arrayOfNulls<ByteArray>(total)
@@ -127,8 +129,9 @@ class BleLink(private val context: Context, private val callbacks: Callbacks) {
         else listOf(Manifest.permission.ACCESS_FINE_LOCATION)   // pre-12 scanning is gated on location
 
     /** Starts advertising, scanning and the GATT server. Safe to call repeatedly. */
-    fun start(id: Int) {
+    fun start(id: Int, id64: Long) {
         myId = id
+        myId64 = id64
         wanted = true
         if (!watching) {
             watching = true
@@ -193,11 +196,19 @@ class BleLink(private val context: Context, private val callbacks: Callbacks) {
         }
     }
 
-    /** Ids heard over the radio within [withinMs]. */
+    /** 16-bit ids heard over the radio within [withinMs], for the sound world. */
     fun nearbyIds(withinMs: Long): List<Int> {
         synchronized(peers) {
             val now = SystemClock.elapsedRealtime()
-            return peers.entries.filter { now - it.value.lastSeen < withinMs }.map { it.key }
+            return peers.values.filter { now - it.lastSeen < withinMs }.map { (it.id64 and 0xFFFF).toInt() }
+        }
+    }
+
+    /** 64-bit ids heard within [withinMs], which is who the carry network can sync with. */
+    fun nearbyIds64(withinMs: Long): List<Long> {
+        synchronized(peers) {
+            val now = SystemClock.elapsedRealtime()
+            return peers.values.filter { now - it.lastSeen < withinMs }.map { it.id64 }
         }
     }
 
@@ -232,6 +243,19 @@ class BleLink(private val context: Context, private val callbacks: Callbacks) {
         return true
     }
 
+    /** Writes [frame] to the one phone advertising [id64]. False if it has not been seen lately. */
+    fun sendTo(id64: Long, frame: ByteArray, onResult: (Boolean) -> Unit): Boolean {
+        if (!running) return false
+        val device = synchronized(peers) {
+            peers[id64]?.takeIf { SystemClock.elapsedRealtime() - it.lastSeen < PEER_FRESH_MS }?.device
+        } ?: return false
+        handler.post {
+            val c = connectionTo(device)
+            if (c == null) onResult(false) else c.enqueue(Pending(frame, onResult))
+        }
+        return true
+    }
+
     /** One frame on its way to one phone, and who to tell when it lands or does not. */
     private class Pending(val frame: ByteArray, val onResult: (Boolean) -> Unit) {
         private var done = false
@@ -261,9 +285,9 @@ class BleLink(private val context: Context, private val callbacks: Callbacks) {
             .setTimeout(0)
             .build()
         // A legacy advertisement holds 31 bytes, of which the flags take 3 and a 128-bit
-        // service uuid takes 18. Our three bytes of service data would not fit beside them,
-        // so they ride in the scan response, which gets 31 bytes of its own. Android merges
-        // the two before handing a scan record to the callback.
+        // service uuid takes 18. Our nine bytes of service data would not fit beside them, so
+        // they ride in the scan response, which gets 31 bytes of its own (2 + 16 for the uuid
+        // + 9 = 27). Android merges the two before handing a scan record to the callback.
         val primary = AdvertiseData.Builder()
             .setIncludeDeviceName(false)
             .setIncludeTxPowerLevel(false)
@@ -272,7 +296,7 @@ class BleLink(private val context: Context, private val callbacks: Callbacks) {
         val response = AdvertiseData.Builder()
             .setIncludeDeviceName(false)
             .setIncludeTxPowerLevel(false)
-            .addServiceData(ParcelUuid(SERVICE_UUID), byteArrayOf(FORMAT, (myId shr 8).toByte(), myId.toByte()))
+            .addServiceData(ParcelUuid(SERVICE_UUID), ByteBuffer.allocate(9).put(FORMAT).putLong(myId64).array())
             .build()
         runCatching { advertiser.startAdvertising(settings, primary, response, advertiseCallback) }
             .onFailure { Log.w(TAG, "startAdvertising threw", it) }
@@ -294,23 +318,24 @@ class BleLink(private val context: Context, private val callbacks: Callbacks) {
 
         private fun handle(result: ScanResult) {
             val sd = result.scanRecord?.getServiceData(ParcelUuid(SERVICE_UUID)) ?: return
-            if (sd.size < 3 || sd[0] != FORMAT) return
-            val id = ((sd[1].toInt() and 0xFF) shl 8) or (sd[2].toInt() and 0xFF)
-            if (id == 0 || id == myId) return
+            if (sd.size < 9 || sd[0] != FORMAT) return
+            val id64 = ByteBuffer.wrap(sd, 1, 8).long
+            if (id64 == 0L || id64 == myId64) return
+            val id = (id64 and 0xFFFF).toInt()
             val fresh: Boolean
             var stale: String? = null
             synchronized(peers) {
                 val now = SystemClock.elapsedRealtime()
-                val p = peers[id]
+                val p = peers[id64]
                 fresh = p == null || now - p.lastSeen > PEER_FRESH_MS
                 when {
-                    p == null -> peers[id] = Peer(result.device, now, result.rssi)
+                    p == null -> peers[id64] = Peer(result.device, id64, now, result.rssi)
                     // Android rotates a phone's Bluetooth address for privacy; the id in the
                     // advertisement is what identifies it, so follow the address it moved to
                     // and drop the connection to the one it left.
                     p.device.address != result.device.address -> {
                         stale = p.device.address
-                        peers[id] = Peer(result.device, now, result.rssi)
+                        p.device = result.device; p.lastSeen = now; p.rssi = result.rssi
                     }
                     else -> { p.lastSeen = now; p.rssi = result.rssi }
                 }
@@ -319,10 +344,10 @@ class BleLink(private val context: Context, private val callbacks: Callbacks) {
             // Advertisements arrive several times a second; the app only needs to know a phone
             // is there, and every report costs a preferences write and a recomposition.
             val now = SystemClock.elapsedRealtime()
-            val last = lastReported[id] ?: 0L
+            val last = lastReported[id64] ?: 0L
             if (fresh || now - last > PRESENCE_REPORT_MS) {
-                lastReported[id] = now
-                callbacks.onBlePresence(id, result.rssi)
+                lastReported[id64] = now
+                callbacks.onBlePresence(id64, id, result.rssi)
             }
             if (fresh) { Log.i(TAG, "peer ${IdentityStore.tagOf(id)} at ${result.rssi} dBm"); report(null) }
         }
@@ -585,7 +610,7 @@ class BleLink(private val context: Context, private val callbacks: Callbacks) {
         val SERVICE_UUID: UUID = UUID.fromString("50770001-0000-1000-8000-00805f9b34fb")
         val CHAR_UUID: UUID = UUID.fromString("50770002-0000-1000-8000-00805f9b34fb")
         /** Marks the advertisement's layout, so a future change can be told apart. */
-        private const val FORMAT: Byte = 1
+        private const val FORMAT: Byte = 2   // advertisement layout: format byte then a 64-bit id
         private const val PEER_FRESH_MS = 45_000L
         private const val REASSEMBLE_MS = 5_000L
         private const val IDLE_MS = 25_000L

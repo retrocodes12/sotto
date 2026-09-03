@@ -13,8 +13,8 @@ android {
         applicationId = "com.sotto"
         minSdk = 26
         targetSdk = 35
-        versionCode = 16
-        versionName = "0.23"
+        versionCode = 17
+        versionName = "0.24"
 
         ndk {
             abiFilters += listOf("arm64-v8a", "armeabi-v7a", "x86_64")
@@ -66,4 +66,5 @@ dependencies {
     implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.9.4")
     implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.9.4")
     implementation("androidx.lifecycle:lifecycle-runtime-compose:2.9.4")
+    testImplementation("junit:junit:4.13.2")
 }

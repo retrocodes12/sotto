@@ -21,6 +21,10 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import com.sotto.carry.Bundle
+import com.sotto.carry.BundleKey
+import com.sotto.carry.CarryEngine
+import com.sotto.carry.Ids
 import kotlinx.coroutines.launch
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -51,6 +55,13 @@ class LogEntry(
     val imageBytes: ByteArray? = null,
     /** A shared link, Wi-Fi network or contact: kind and its fields. */
     val card: Card? = null,
+    /** The carried message this tile belongs to, if it went into the network. */
+    val bundleSeq: Int? = null,
+    /** Phones this one handed it to, the reach estimate, and how it was delivered. */
+    val handed: Int = 0,
+    val reach: Int = 0,
+    val carriedHops: Int = 0,
+    val deliveredAfter: Pair<Int, Int>? = null,   // hops, minutes
 ) {
     enum class Kind { RX, TX, INFO }
 
@@ -60,7 +71,9 @@ class LogEntry(
         text: String = this.text, image: Bitmap? = this.image, progress: String? = this.progress,
         bytes: Int = this.bytes, fraction: Float? = this.fraction, senderId: Int? = this.senderId, via: Int? = this.via,
         delivered: Boolean = this.delivered, imageBytes: ByteArray? = this.imageBytes, protocol: String = this.protocol,
-    ) = LogEntry(id, time, kind, text, protocol, bytes, image, progress, fraction, senderId, via, peer, seq, delivered, imageBytes, card)
+        handed: Int = this.handed, reach: Int = this.reach, deliveredAfter: Pair<Int, Int>? = this.deliveredAfter,
+    ) = LogEntry(id, time, kind, text, protocol, bytes, image, progress, fraction, senderId, via, peer, seq, delivered, imageBytes, card,
+        bundleSeq, handed, reach, carriedHops, deliveredAfter)
 }
 
 /** Owns the [SoundLink] and exposes everything the UI shows as Compose state. */
@@ -76,14 +89,57 @@ class MainViewModel(app: Application) : AndroidViewModel(app), SoundLink.Callbac
      * Everything falls back to sound the moment no phone is in Bluetooth range.
      */
     private val ble = BleLink(app, object : BleLink.Callbacks {
-        override fun onBleFrame(payload: ByteArray) = onMessage(payload, BleLink.PROTOCOL_ID, 0f)
-        override fun onBlePresence(id: Int, rssi: Int) {
-            main.post { if (id != identity.id) noteSender(id, BleLink.PROTOCOL_ID) }
+        override fun onBleFrame(payload: ByteArray) {
+            // The carry network's own frames never reach the sound world's parser.
+            if (carry.isSyncFrame(payload)) main.post { carry.onFrame(payload) }
+            else onMessage(payload, BleLink.PROTOCOL_ID, 0f)
+        }
+        override fun onBlePresence(id64: Long, id16: Int, rssi: Int) {
+            main.post {
+                if (id16 != identity.id) { noteSender(id16, BleLink.PROTOCOL_ID); identity.learnWideId(id64) }
+                carry.onPeerSeen(id64)
+            }
         }
         override fun onBleState(running: Boolean, peers: Int, note: String?) {
             main.post { bleRunning = running; blePeers = peers; bleNote = note }
         }
     })
+
+    /**
+     * Messages this phone holds for other people. A message no longer has to cross the whole
+     * distance while everyone is in range at once: it rides along with whoever is walking that
+     * way, and arrives minutes or hours later somewhere the sender could never have reached.
+     */
+    val carry: CarryEngine = CarryEngine(app, identity.id64, identity::nextSeq, object : CarryEngine.Transport {
+        override fun sendTo(peer: Long, frame: ByteArray): Boolean =
+            bluetoothOn && ble.sendTo(peer, frame) { }
+        override fun peersInRange(): List<Long> = if (bluetoothOn) ble.nearbyIds64(PRESENT_FOR_MS) else emptyList()
+    }, object : CarryEngine.Events {
+        override fun onCarried(bundle: Bundle) { onCarriedBundle(bundle) }
+        override fun onDelivered(key: BundleKey, hops: Int, minutes: Int) {
+            logFor(key)?.let { id -> updateLog(id) { it.with(delivered = true, deliveredAfter = hops to minutes) } }
+        }
+        override fun onHanded(key: BundleKey, count: Int) { logFor(key)?.let { id -> updateLog(id) { it.with(handed = count) } } }
+        override fun onReach(key: BundleKey, phones: Int) { logFor(key)?.let { id -> updateLog(id) { it.with(reach = phones) } } }
+        override fun onStoreChanged(held: Int, bytes: Long) { carryHeld = held; carryBytes = bytes }
+    })
+
+    var carryHeld by mutableIntStateOf(0)
+        private set
+    var carryBytes by mutableStateOf(0L)
+        private set
+    var carryOn by mutableStateOf(true)
+        private set
+
+    fun setCarry(on: Boolean) {
+        carryOn = on
+        carry.carrying = on
+        if (!on) carry.forget()
+    }
+
+    /** The tile that belongs to one of our own carried messages. */
+    private fun logFor(key: BundleKey): Long? =
+        if (key.origin != identity.id64) null else log.firstOrNull { it.bundleSeq == key.seq }?.id
 
     /** The user's choice. Off keeps every frame on the speaker. */
     var bluetoothOn by mutableStateOf(true)
@@ -109,7 +165,8 @@ class MainViewModel(app: Application) : AndroidViewModel(app), SoundLink.Callbac
     fun startBle() {
         if (!bluetoothOn || !ble.hasHardware()) return
         if (ble.missingPermissions().isNotEmpty()) { bleNote = "Bluetooth permission not granted"; return }
-        ble.start(identity.id)
+        ble.start(identity.id, identity.id64)
+        publishProfile()
     }
 
     fun blePermissionsNeeded(): List<String> = if (bluetoothOn && ble.hasHardware()) ble.missingPermissions() else emptyList()
@@ -485,6 +542,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app), SoundLink.Callbac
     fun onForeground() {
         inForeground = true
         startBle()
+        carry.start()
         if (wantListening && captureSource == null) link.startListening()
         if (SystemClock.elapsedRealtime() - lastUpdateCheck > UPDATE_CHECK_EVERY_MS) checkForUpdates(manual = false)
     }
@@ -578,16 +636,17 @@ class MainViewModel(app: Application) : AndroidViewModel(app), SoundLink.Callbac
                 overTheSpeaker(bytes, pid, vol, quiet = false)
             }
         }
+        val carriedSeq = intoTheNetwork(text, peer, seq)
         if (radioAttempt) {
             sending = false
-            radioLogId = addLog(LogEntry.Kind.TX, text, BleLink.PROTOCOL_ID, bytes.size, peer = peer, seq = if (peer != null) seq else null)
+            radioLogId = addLog(LogEntry.Kind.TX, text, BleLink.PROTOCOL_ID, bytes.size, peer = peer, seq = if (peer != null) seq else null, bundleSeq = carriedSeq)
             return
         }
         link.post {
             val ok = link.transmit(bytes, pid, vol)
             main.post {
                 sending = false
-                if (ok) addLog(LogEntry.Kind.TX, text, pid, bytes.size, peer = peer, seq = if (peer != null) seq else null)
+                if (ok) addLog(LogEntry.Kind.TX, text, pid, bytes.size, peer = peer, seq = if (peer != null) seq else null, bundleSeq = carriedSeq)
                 else { status = "${Modem.protocolName(pid)} refused to encode ${bytes.size} bytes"; if (draft.isEmpty()) draft = text }
             }
         }
@@ -773,6 +832,74 @@ class MainViewModel(app: Application) : AndroidViewModel(app), SoundLink.Callbac
         }
     }
 
+    // ---- the carry network -----------------------------------------------------------------
+
+    /**
+     * Hands a message to the carry network as well as playing it live. A room message spreads
+     * to everyone; a private one is sealed to its person and given a budget of copies. Returns
+     * the sequence the tile follows, or null when it could not be carried.
+     */
+    private fun intoTheNetwork(text: String, peer: Int?, seq: Int): Int? {
+        if (!carryOn) return null
+        if (peer == null) { carry.postRoom(text.toByteArray(Charsets.UTF_8)); return seq }
+        val dest = identity.wideId(peer) ?: return null   // nobody has told us their full id yet
+        val key = identity.peerKeys[peer] ?: return null
+        val sealed = runCatching { Crypto.encrypt(key, identity.id, peer, seq, text.toByteArray(Charsets.UTF_8)) }.getOrNull() ?: return null
+        carry.postPrivate(dest, sealed)
+        return seq
+    }
+
+    /** A message someone carried here. */
+    private fun onCarriedBundle(b: Bundle) {
+        val from16 = Ids.id16(b.origin)
+        when (b.kind) {
+            Bundle.KIND_PROFILE -> {
+                val (name, pub) = Bundle.parseProfile(b.payload) ?: return
+                identity.learnWideId(b.origin)
+                if (from16 != identity.id) {
+                    val known = identity.contacts[from16]?.name?.isNotEmpty() == true
+                    identity.heard(from16, name.ifEmpty { null }, direct = false)
+                    // Their key arriving this way is what lets you write privately to someone
+                    // you have never stood next to.
+                    if (!identity.peerKeys.containsKey(from16)) identity.learnPublicKey(from16, pub)
+                    if (!known && name.isNotEmpty()) addLog(LogEntry.Kind.INFO, "$name is on the network", BleLink.PROTOCOL_ID, 0)
+                }
+            }
+            Bundle.KIND_ROOM -> {
+                if (from16 == identity.id) return
+                if (markSeen(seenKey(from16, b.seq and 0xFF, transfer = false))) return   // already heard it live
+                identity.learnWideId(b.origin)
+                identity.heard(from16, direct = false)
+                val text = String(b.payload, Charsets.UTF_8)
+                addLog(LogEntry.Kind.RX, text, BleLink.PROTOCOL_ID, b.payload.size, senderId = from16, carriedHops = b.hops)
+                notifyMessage(identity.nameFor(from16) ?: "Sotto", text, from16)
+            }
+            Bundle.KIND_PRIVATE -> {
+                if (b.dest != identity.id64 || from16 == identity.id) return   // just carrying it
+                if (markSeen(seenKey(from16, b.seq and 0xFF, transfer = false))) { carry.acknowledge(b); return }
+                identity.learnWideId(b.origin)
+                val key = identity.peerKeys[from16]
+                val plain = key?.let { Crypto.decrypt(it, from16, identity.id, b.seq, b.payload) }
+                if (plain == null) {
+                    addLog(LogEntry.Kind.INFO, "A carried private message from ${identity.nameFor(from16)} could not be read.", BleLink.PROTOCOL_ID, 0, peer = from16)
+                    return
+                }
+                identity.heard(from16, direct = false)
+                val text = String(plain, Charsets.UTF_8)
+                addLog(LogEntry.Kind.RX, text, BleLink.PROTOCOL_ID, b.payload.size, senderId = from16, peer = from16, carriedHops = b.hops)
+                if (openChat != from16) unread[from16] = (unread[from16] ?: 0) + 1
+                notifyMessage("${identity.nameFor(from16)} · private", text, from16)
+                carry.acknowledge(b)   // tells the sender, and lets every carrier drop its copy
+            }
+        }
+    }
+
+    /** Publishes who this phone is, so someone who has never met it can still write to it. */
+    private fun publishProfile() {
+        if (!carryOn || identity.name.isEmpty()) return
+        carry.postProfile(identity.name, identity.publicKey)
+    }
+
     // ---- identity ------------------------------------------------------------------------
 
     /** A frame from [id] arrived. Unknown senders get our name, which invites theirs. */
@@ -818,6 +945,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app), SoundLink.Callbac
     fun setName(name: String) {
         identity.rename(name)
         helloSentAt.clear()
+        publishProfile()
     }
 
     // ---- relaying ------------------------------------------------------------------------
@@ -1104,15 +1232,16 @@ class MainViewModel(app: Application) : AndroidViewModel(app), SoundLink.Callbac
 
     override fun onCleared() {
         cancelBurst()
+        carry.stop()
         ble.close()
         link.close()
     }
 
     // ---- helpers ------------------------------------------------------------------------
 
-    private fun addLog(kind: LogEntry.Kind, text: String, protocolId: Int, bytes: Int, image: Bitmap? = null, progress: String? = null, fraction: Float? = null, senderId: Int? = null, via: Int? = null, peer: Int? = null, seq: Int? = null, imageBytes: ByteArray? = null, card: LogEntry.Card? = null): Long {
+    private fun addLog(kind: LogEntry.Kind, text: String, protocolId: Int, bytes: Int, image: Bitmap? = null, progress: String? = null, fraction: Float? = null, senderId: Int? = null, via: Int? = null, peer: Int? = null, seq: Int? = null, imageBytes: ByteArray? = null, card: LogEntry.Card? = null, bundleSeq: Int? = null, carriedHops: Int = 0): Long {
         val id = nextLogId++
-        log.add(0, LogEntry(id, clock.format(Date()), kind, text, Modem.protocolName(protocolId), bytes, image, progress, fraction, senderId, via, peer, seq, imageBytes = imageBytes, card = card))
+        log.add(0, LogEntry(id, clock.format(Date()), kind, text, Modem.protocolName(protocolId), bytes, image, progress, fraction, senderId, via, peer, seq, imageBytes = imageBytes, card = card, bundleSeq = bundleSeq, carriedHops = carriedHops))
         while (log.size > MAX_LOG) log.removeAt(log.size - 1)
         scheduleSave()
         return id

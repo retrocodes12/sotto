@@ -131,6 +131,16 @@ fun SettingsSheet(vm: MainViewModel, onDismiss: () -> Unit) {
             }
 
             SwitchRow(
+                "Carry messages for others",
+                if (vm.carryOn)
+                    "Holds ${vm.carryHeld} ${if (vm.carryHeld == 1) "message" else "messages"}, ${vm.carryBytes / 1024} KB. " +
+                        "A message you send keeps travelling in other people's phones after it leaves yours, so it can reach someone who was never in range."
+                else "Off. Messages only reach phones that are in range when you send.",
+                vm.carryOn,
+            ) { vm.setCarry(it) }
+            Rule()
+
+            SwitchRow(
                 "Repeat for others",
                 if (vm.relayForOthers) "Messages this phone hears are played again once, so phones out of the sender's reach still get them." else "This phone keeps what it hears to itself.",
                 vm.relayForOthers,

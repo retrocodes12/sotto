@@ -272,7 +272,8 @@ private fun MessageTile(e: LogEntry, sender: String?, via: String?) {
         val caption = buildString {
             append(e.time.substring(0, 5))
             if (e.peer != null) append(" · private")
-            if (e.kind == LogEntry.Kind.TX && e.peer != null) append(if (e.delivered) " · delivered" else " · sent")
+            if (e.kind == LogEntry.Kind.TX && e.peer != null && e.deliveredAfter == null) append(if (e.delivered) " · delivered" else " · sent")
+            append(carryCaption(e))
             via?.let { append(" · via "); append(it) }
             e.progress?.let { append(" · "); append(it) } ?: run {
                 if (e.bytes > 0) { append(" · "); append(if (e.bytes >= 1000) "%.1f KB".format(e.bytes / 1000f) else "${e.bytes} B") }
@@ -449,4 +450,27 @@ private fun CardBody(card: LogEntry.Card, ink: Color) {
 @Composable
 private fun ActionLine(label: String, ink: Color, onClick: () -> Unit) {
     Text(label, style = MaterialTheme.typography.labelLarge, color = ink, modifier = Modifier.padding(top = 8.dp).clickable(onClick = onClick))
+}
+
+/**
+ * What a message can honestly say about its journey. The sender only ever learns what it
+ * handed on itself, what the network's own count came back as, and — for a private message —
+ * that it arrived, because the receipt travelled back the same way.
+ */
+private fun carryCaption(e: LogEntry): String {
+    if (e.kind == LogEntry.Kind.RX) return if (e.carriedHops > 0) " · carried, ${e.carriedHops} ${if (e.carriedHops == 1) "hop" else "hops"}" else ""
+    if (e.kind != LogEntry.Kind.TX || e.bundleSeq == null) return ""
+    e.deliveredAfter?.let { (hops, minutes) ->
+        return " · delivered after $hops ${if (hops == 1) "phone" else "phones"}, ${humanMinutes(minutes)}"
+    }
+    if (e.reach > e.handed && e.reach > 1) return " · reached about ${e.reach} phones"
+    if (e.handed > 0) return " · handed to ${e.handed} ${if (e.handed == 1) "phone" else "phones"}"
+    return " · on its way"
+}
+
+private fun humanMinutes(m: Int): String = when {
+    m < 1 -> "under a minute"
+    m < 60 -> "$m min"
+    m < 60 * 24 -> "${m / 60} h ${m % 60} min"
+    else -> "${m / (60 * 24)} d"
 }

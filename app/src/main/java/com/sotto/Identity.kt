@@ -19,9 +19,20 @@ import java.security.SecureRandom
 class IdentityStore(context: Context) {
     private val prefs = context.getSharedPreferences("sotto", Context.MODE_PRIVATE)
 
-    val id: Int = prefs.getInt("id", 0).takeIf { it != 0 } ?: newId().also { prefs.edit().putInt("id", it).apply() }
+    /** This install's X25519 keypair, made once. Everything the phone is called derives from it. */
+    val privateKey: ByteArray = prefs.getString("priv", null)?.let { Base64.decode(it, Base64.NO_WRAP) }
+        ?: Crypto.newPrivateKey().also { prefs.edit().putString("priv", Base64.encodeToString(it, Base64.NO_WRAP)).apply() }
+    val publicKey: ByteArray by lazy { Crypto.publicKey(privateKey) }
+
+    /** The id the carry network uses: 64 bits of the public key's hash. */
+    val id64: Long = com.sotto.carry.Ids.id64(publicKey)
+
+    /** The id the sound frames use: the low 16 bits of the same, so both name one phone. */
+    val id: Int = com.sotto.carry.Ids.id16(id64).let { if (it == 0) 1 else it }
+
     var name: String by mutableStateOf(prefs.getString("name", "") ?: "")
         private set
+
 
     class Contact(val name: String, val lastHeard: Long, val lastDirect: Long = 0L)
 
@@ -39,10 +50,6 @@ class IdentityStore(context: Context) {
 
     val tag: String get() = tagOf(id)
 
-    /** This install's X25519 keypair, made once. */
-    val privateKey: ByteArray = prefs.getString("priv", null)?.let { Base64.decode(it, Base64.NO_WRAP) }
-        ?: Crypto.newPrivateKey().also { prefs.edit().putString("priv", Base64.encodeToString(it, Base64.NO_WRAP)).apply() }
-    val publicKey: ByteArray by lazy { Crypto.publicKey(privateKey) }
 
     /** Symmetric keys per peer, derived once their public key has arrived by sound. */
     val peerKeys = mutableStateMapOf<Int, ByteArray>()
@@ -71,6 +78,19 @@ class IdentityStore(context: Context) {
         return true
     }
 
+    /** The 64-bit id of a phone we know, when we have seen it advertise or read its profile. */
+    val wideIds = mutableStateMapOf<Int, Long>()
+
+    fun learnWideId(id64: Long) {
+        val id16 = com.sotto.carry.Ids.id16(id64)
+        if (wideIds[id16] != id64) {
+            wideIds[id16] = id64
+            prefs.edit().putLong("wide$id16", id64).apply()
+        }
+    }
+
+    fun wideId(id16: Int): Long? = wideIds[id16] ?: prefs.getLong("wide$id16", 0L).takeIf { it != 0L }?.also { wideIds[id16] = it }
+
     /** True if [pub] is the key we already hold for [id]. */
     fun samePublicKey(id: Int, pub: ByteArray): Boolean = peerPubs[id]?.contentEquals(pub) == true
 
@@ -89,9 +109,13 @@ class IdentityStore(context: Context) {
         return n
     }
 
-    /** Next per-install message number (0..255), so relays and receivers can tell copies apart. */
+    /**
+     * Next message number for this install. The live sound frames carry its low byte, which is
+     * all they can afford, and the carried bundles carry all 32 bits; both therefore name the
+     * same message, so one that arrives twice by two routes is shown once.
+     */
     fun nextSeq(): Int {
-        val n = (prefs.getInt("seq", 0) + 1) and 0xFF
+        val n = prefs.getInt("seq", 0) + 1
         prefs.edit().putInt("seq", n).apply()
         return n
     }
@@ -133,12 +157,6 @@ class IdentityStore(context: Context) {
 
         fun tagOf(id: Int): String = "#" + (3 downTo 0).joinToString("") { ALPHABET[(id shr (it * 4)) and 15].toString() }
 
-        private fun newId(): Int {
-            val r = SecureRandom()
-            var v = 0
-            while (v == 0) v = r.nextInt(0x10000)
-            return v
-        }
     }
 }
 

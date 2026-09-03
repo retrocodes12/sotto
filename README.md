@@ -166,6 +166,17 @@ payloads.
   someone whose key is already held is never swapped in silently: the chat shows both
   fingerprints and asks, since anyone in earshot can play a KEY frame. Replayed private
   messages are dropped by a per-peer counter.
+- **Messages keep travelling after they leave your phone.** Anything you send also goes into a
+  store that other phones carry: when two phones meet they trade what the other lacks, so a
+  message rides along in someone's pocket and arrives somewhere you were never in range of.
+  Room messages spread to everyone for a day; private ones are sealed to one person, given
+  sixteen copies that halve at each meeting, and kept for three days. When one arrives, a
+  receipt travels back the same way, the tile says how long it took and through how many
+  phones, and every carrier drops its copy. Each phone also publishes a small profile (name and
+  public key) that spreads the same way, so you can write privately to someone you have never
+  stood next to. A tile says only what the phone can know: "handed to 3 phones", "reached about
+  40 phones" from a 32-byte counting sketch that merges as copies meet, and "delivered" only
+  when the receipt is actually back.
 - **Bluetooth, beside the sound.** The same frames also travel over Bluetooth LE when a phone is
   in radio range: further, faster, and without spending airtime. Every phone advertises its tag
   and scans for others, so there is still nothing to pair and no server. A frame the radio fails
@@ -308,6 +319,8 @@ app/src/main/java/com/sotto/MainActivity.kt  permission gate and screen switch
 app/src/main/java/com/sotto/ui/              conversation, welcome and settings screens, theme
 app/src/main/java/com/sotto/Transfer.kt      chunking and resend requests for photos
 app/src/main/java/com/sotto/Updates.kt       in-app updates from GitHub releases
+app/src/main/java/com/sotto/carry/           the carry network: bundles, store, sync, engine
+app/src/test/java/com/sotto/carry/           its unit tests, which run on a laptop
 tools/bench.cpp                              the channel simulation and the tables above
 tools/dumpwave.cpp, hero.py                  the README artwork
 docs/                                        the generated SVGs
