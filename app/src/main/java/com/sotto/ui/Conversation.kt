@@ -55,10 +55,8 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
-import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
-import androidx.compose.runtime.DisposableEffect
 import com.sotto.LogEntry
 import com.sotto.MainViewModel
 import com.sotto.Modem
@@ -72,11 +70,6 @@ fun ConversationScreen(vm: MainViewModel) {
     LaunchedEffect(Unit) {
         vm.ensureListening()
         while (true) { vm.refreshMediaVolume(); delay(1000) }
-    }
-    val view = LocalView.current
-    DisposableEffect(vm.wantListening) {
-        view.keepScreenOn = vm.wantListening
-        onDispose { view.keepScreenOn = false }
     }
 
     val chat = vm.openChat

@@ -123,6 +123,12 @@ fun SettingsSheet(vm: MainViewModel, onDismiss: () -> Unit) {
             Rule()
 
             SwitchRow("Listening", if (vm.captureSource != null) "Mic on, ${vm.captureSource}" else "Off. Nothing arrives while off.", vm.wantListening) { vm.setListening(it) }
+            Spacer(Modifier.height(14.dp))
+            SwitchRow(
+                "Keep listening in the background",
+                if (vm.listenInBackground) "Screen off or another app in front, messages still arrive. A quiet notification shows while the mic is open." else "Listening stops when Sotto leaves the screen.",
+                vm.listenInBackground,
+            ) { vm.keepListeningInBackground(it) }
             Rule()
 
             SwitchRow(

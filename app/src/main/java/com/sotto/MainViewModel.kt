@@ -1,6 +1,10 @@
 package com.sotto
 
 import android.app.Application
+import android.app.NotificationManager
+import android.app.PendingIntent
+import android.content.Intent
+import androidx.core.app.NotificationCompat
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.net.Uri
@@ -59,6 +63,16 @@ class MainViewModel(app: Application) : AndroidViewModel(app), SoundLink.Callbac
 
     /** Repeat what this phone hears so phones out of earshot of the sender still get it. */
     var relayForOthers by mutableStateOf(true)
+
+    /** Keep the microphone open with the screen off, behind a quiet notification. */
+    var listenInBackground by mutableStateOf(true)
+        private set
+
+    fun keepListeningInBackground(on: Boolean) {
+        listenInBackground = on
+        if (!on && !inForeground) { link.stopListening(); ListenService.stop(getApplication()) }
+        if (on && wantListening) ListenService.start(getApplication())
+    }
 
     /** Private chats. [openChat] is the peer whose chat is on screen; null is the room. */
     var openChat by mutableStateOf<Int?>(null)
@@ -182,7 +196,13 @@ class MainViewModel(app: Application) : AndroidViewModel(app), SoundLink.Callbac
     fun setListening(on: Boolean) {
         wantListening = on
         status = null
-        if (on) link.startListening() else link.stopListening()
+        if (on) {
+            link.startListening()
+            if (listenInBackground) ListenService.start(getApplication())
+        } else {
+            link.stopListening()
+            ListenService.stop(getApplication())
+        }
     }
 
     /** The conversation screen calls this once the mic permission exists: listening is the default. */
@@ -286,7 +306,18 @@ class MainViewModel(app: Application) : AndroidViewModel(app), SoundLink.Callbac
 
     fun onBackground() {
         inForeground = false
-        link.stopListening()
+        if (!listenInBackground) link.stopListening()
+    }
+
+    /** Notifies about a message that arrived while the app was not on screen. */
+    private fun notifyMessage(title: String, text: String, id: Int) {
+        if (inForeground) return
+        val app = getApplication<Application>()
+        val open = PendingIntent.getActivity(app, 0, Intent(app, MainActivity::class.java), PendingIntent.FLAG_IMMUTABLE)
+        val n = NotificationCompat.Builder(app, SottoApplication.CHANNEL_MESSAGES)
+            .setSmallIcon(R.drawable.ic_notify).setContentTitle(title).setContentText(text)
+            .setContentIntent(open).setAutoCancel(true).build()
+        runCatching { app.getSystemService(NotificationManager::class.java).notify(1000 + (id and 0xFFF), n) }
     }
 
     fun refreshMediaVolume() {
@@ -387,6 +418,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app), SoundLink.Callbac
                     }
                     trackBurst(m.text)
                     addLog(LogEntry.Kind.RX, m.text, protocolId, payload.size, senderId = m.id, via = m.via)
+                    notifyMessage(identity.nameFor(m.id) ?: "Sotto", m.text, m.id)
                     if (relayForOthers && m.hops > 0) scheduleRelay(key, Wire.relay(m.id, m.seq, m.hops - 1, identity.id, m.text), protocolId)
                 }
                 is Wire.Parsed.Hello -> {
@@ -425,6 +457,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app), SoundLink.Callbac
                             Log.i(TAG, "rx private ${payload.size} B from ${IdentityStore.tagOf(m.from)}")
                             addLog(LogEntry.Kind.RX, text, protocolId, payload.size, senderId = m.from, peer = m.from)
                             if (openChat != m.from) unread[m.from] = (unread[m.from] ?: 0) + 1
+                            notifyMessage("${identity.nameFor(m.from)} · private", text, m.from)
                         }
                     } else if (relayForOthers && m.hops > 0) {
                         scheduleRelay(key, Wire.relayPrivate(m.raw), protocolId)   // not for us: repeat it unread
@@ -597,6 +630,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app), SoundLink.Callbac
             Transfer.KIND_JPEG -> {
                 val bmp = BitmapFactory.decodeByteArray(content, 0, content.size)
                 updateLog(x.logId) { it.with(text = if (bmp != null) "" else "photo could not be decoded", image = bmp, progress = null, fraction = null, bytes = content.size) }
+                notifyMessage(identity.nameFor(assembled.sender) ?: "Sotto", "sent a photo", assembled.sender)
             }
             else -> updateLog(x.logId) { it.with(text = String(content, Charsets.UTF_8), progress = null, fraction = null, bytes = content.size) }
         }

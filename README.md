@@ -145,6 +145,10 @@ payloads.
   (`UNPROCESSED`, `VOICE_RECOGNITION` or `MIC`).
 - **Message** box with a byte counter and, for Sotto protocols, the seconds of audio the
   draft will take. Send greys out above 100 bytes.
+- **Listens with the screen off.** A foreground service holds the microphone behind a quiet
+  "Sotto is listening" notification with a Stop action, so a phone on the table keeps
+  receiving. Messages that arrive while the app is not on screen show as notifications.
+  Settings can switch it off, in which case listening stops when the app does.
 - **Private chats.** Tap a name to open a chat only that person can read. The two phones
   swap X25519 public keys by sound once (about six seconds each way on ultrasound); messages
   are then AES-256-GCM encrypted to that phone. Relays repeat them without being able to read

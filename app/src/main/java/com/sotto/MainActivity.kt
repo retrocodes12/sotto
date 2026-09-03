@@ -26,6 +26,9 @@ import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.LifecycleResumeEffect
 import androidx.lifecycle.compose.LifecycleStartEffect
 import androidx.lifecycle.viewmodel.compose.viewModel
+import androidx.lifecycle.ViewModelStoreOwner
+import android.os.Build
+import androidx.compose.runtime.LaunchedEffect
 import com.sotto.ui.ConversationScreen
 import com.sotto.ui.NameScreen
 import com.sotto.ui.SottoTheme
@@ -40,8 +43,10 @@ class MainActivity : ComponentActivity() {
 }
 
 @Composable
-fun SottoApp(vm: MainViewModel = viewModel()) {
+fun SottoApp() {
     val context = LocalContext.current
+    // The engine lives for the process (see SottoApplication), not for this activity.
+    val vm: MainViewModel = viewModel(viewModelStoreOwner = context.applicationContext as ViewModelStoreOwner)
     fun hasMic() = ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
 
     var granted by remember { mutableStateOf(hasMic()) }
@@ -49,6 +54,13 @@ fun SottoApp(vm: MainViewModel = viewModel()) {
     val launcher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { ok ->
         granted = ok
         if (!ok) deniedOnce = true
+    }
+
+    val notifLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { }
+    LaunchedEffect(granted, vm.identity.name) {
+        if (granted && vm.identity.name.isNotEmpty() && Build.VERSION.SDK_INT >= 33 &&
+            ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
+        ) notifLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
     }
 
     LifecycleResumeEffect(Unit) {
