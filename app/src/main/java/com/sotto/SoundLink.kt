@@ -93,6 +93,21 @@ class SoundLink(context: Context, private val callbacks: Callbacks) {
         return true
     }
 
+    /**
+     * Listen before talking: block the calling (transmit) thread until no frame is being
+     * received, up to [maxWaitMs]. Returns false if the band never went quiet.
+     */
+    fun waitUntilQuiet(maxWaitMs: Long): Boolean {
+        val until = SystemClock.elapsedRealtime() + maxWaitMs
+        var quietFor = 0L
+        while (SystemClock.elapsedRealtime() < until) {
+            if (captureRunning.get() && modem.receiving) quietFor = 0 else quietFor += 50
+            if (quietFor >= 250) return true
+            SystemClock.sleep(50)
+        }
+        return false
+    }
+
     /** Media (STREAM_MUSIC) volume as a fraction of its maximum. */
     fun mediaVolumeFraction(): Float {
         val max = audioManager.getStreamMaxVolume(AudioManager.STREAM_MUSIC)

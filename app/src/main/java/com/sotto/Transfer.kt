@@ -6,7 +6,7 @@ package com.sotto
  * Wire format, one modem frame each. Every frame starts with a tag byte that cannot begin
  * UTF-8 text, so plain messages and transfer frames share the channel.
  *
- *   DATA  A5 | id | seq | total | bytes...      chunk 0's bytes start with kind(1) len(2) sender(2) 0(1)
+ *   DATA  A5 | id | seq | total | bytes...      chunk 0's bytes start with kind(1) len(2) sender(2) msgSeq(1) hops(1) 0(1)
  *   END   A7 | id | total                       "pass finished; tell me what you are missing"
  *   REQ   A6 | id | n | seq...                  receiver's missing list
  *   DONE  A8 | id                               receiver has everything
@@ -23,7 +23,7 @@ object Transfer {
     private const val TAG_REQ = 0xA6
     private const val TAG_END = 0xA7
     private const val TAG_DONE = 0xA8
-    private const val META = 6
+    private const val META = 8
     private const val FIRST_CHUNK_BYTES = MAX_FRAME - 4 - META
     private const val CHUNK_BYTES = MAX_FRAME - 4
 
@@ -53,14 +53,14 @@ object Transfer {
     }
 
     /** Splits content into chunk payloads (whole frames, tag included). At most 255 chunks. */
-    fun chunks(id: Int, kind: Int, sender: Int, content: ByteArray): List<ByteArray>? {
+    fun chunks(id: Int, kind: Int, sender: Int, msgSeq: Int, hops: Int, content: ByteArray): List<ByteArray>? {
         val rest = (content.size - FIRST_CHUNK_BYTES).coerceAtLeast(0)
         val total = 1 + (rest + CHUNK_BYTES - 1) / CHUNK_BYTES
         if (total > 255 || content.size > 0xFFFF) return null
         val out = ArrayList<ByteArray>(total)
         var off = 0
         for (seq in 0 until total) {
-            val head = if (seq == 0) byteArrayOf(kind.toByte(), (content.size shr 8).toByte(), content.size.toByte(), (sender shr 8).toByte(), sender.toByte(), 0) else ByteArray(0)
+            val head = if (seq == 0) byteArrayOf(kind.toByte(), (content.size shr 8).toByte(), content.size.toByte(), (sender shr 8).toByte(), sender.toByte(), msgSeq.toByte(), hops.toByte(), 0) else ByteArray(0)
             val take = minOf(if (seq == 0) FIRST_CHUNK_BYTES else CHUNK_BYTES, content.size - off)
             out += byteArrayOf(TAG_DATA.toByte(), id.toByte(), seq.toByte(), total.toByte()) + head + content.copyOfRange(off, off + take)
             off += take
@@ -75,7 +75,7 @@ object Transfer {
         return byteArrayOf(TAG_REQ.toByte(), id.toByte(), m.size.toByte()) + ByteArray(m.size) { m[it].toByte() }
     }
 
-    class Assembled(val kind: Int, val sender: Int, val content: ByteArray)
+    class Assembled(val kind: Int, val sender: Int, val msgSeq: Int, val hops: Int, val content: ByteArray)
 
     /** Kind, sender and content from a complete set of chunk bytes (tag and header stripped). */
     fun assemble(parts: List<ByteArray>): Assembled? {
@@ -85,7 +85,7 @@ object Transfer {
         val len = ((first[1].toInt() and 0xFF) shl 8) or (first[2].toInt() and 0xFF)
         val sender = ((first[3].toInt() and 0xFF) shl 8) or (first[4].toInt() and 0xFF)
         val body = first.copyOfRange(META, first.size) + parts.drop(1).fold(ByteArray(0)) { acc, b -> acc + b }
-        return if (body.size == len) Assembled(kind, sender, body) else null
+        return if (body.size == len) Assembled(kind, sender, first[5].toInt() and 0xFF, first[6].toInt() and 0xFF, body) else null
     }
 
     /** Receiver-side bookkeeping for one transfer. */

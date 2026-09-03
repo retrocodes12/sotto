@@ -36,13 +36,14 @@ class LogEntry(
     val progress: String? = null,
     val fraction: Float? = null,
     val senderId: Int? = null,
+    val via: Int? = null,
 ) {
     enum class Kind { RX, TX, INFO }
 
     fun with(
         text: String = this.text, image: Bitmap? = this.image, progress: String? = this.progress,
-        bytes: Int = this.bytes, fraction: Float? = this.fraction, senderId: Int? = this.senderId,
-    ) = LogEntry(id, time, kind, text, protocol, bytes, image, progress, fraction, senderId)
+        bytes: Int = this.bytes, fraction: Float? = this.fraction, senderId: Int? = this.senderId, via: Int? = this.via,
+    ) = LogEntry(id, time, kind, text, protocol, bytes, image, progress, fraction, senderId, via)
 }
 
 /** Owns the [SoundLink] and exposes everything the UI shows as Compose state. */
@@ -52,6 +53,12 @@ class MainViewModel(app: Application) : AndroidViewModel(app), SoundLink.Callbac
     private val link = SoundLink(app, this)
     val identity = IdentityStore(app)
     private val helloSentAt = HashMap<Int, Long>()
+
+    /** Repeat what this phone hears so phones out of earshot of the sender still get it. */
+    var relayForOthers by mutableStateOf(true)
+    /** (sender, seq) pairs heard recently: shown once, repeated at most once. */
+    private val seen = LinkedHashMap<Int, Long>()
+    private val pendingRelays = HashMap<Int, AtomicBoolean>()
     private val clock = SimpleDateFormat("HH:mm:ss", Locale.US)
 
     /** What the user asked for. The switch reflects this; [captureSource] says whether it is up. */
@@ -219,7 +226,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app), SoundLink.Callbac
     fun send() {
         if (!canSend) return
         val text = draft
-        val bytes = Wire.text(identity.id, text)
+        val bytes = Wire.text(identity.id, identity.nextSeq(), HOP_BUDGET, text)
         val pid = textProtocolId
         val vol = effectiveVolumeFor(pid)
         status = null
@@ -288,10 +295,18 @@ class MainViewModel(app: Application) : AndroidViewModel(app), SoundLink.Callbac
             }
             when (val m = Wire.parse(payload)) {
                 is Wire.Parsed.Text -> {
-                    Log.i(TAG, "rx ${Modem.protocolName(protocolId)} ${payload.size} B from ${IdentityStore.tagOf(m.id)}: ${m.text}")
+                    Log.i(TAG, "rx ${Modem.protocolName(protocolId)} ${payload.size} B from ${IdentityStore.tagOf(m.id)} seq ${m.seq} hops ${m.hops}${m.via?.let { " via ${IdentityStore.tagOf(it)}" } ?: ""}: ${m.text}")
+                    if (m.id == identity.id) return@post              // our own message, back from a relay
                     noteSender(m.id, protocolId)
+                    m.via?.let { identity.heard(it) }
+                    val key = seenKey(m.id, m.seq, transfer = false)
+                    if (markSeen(key)) {                               // heard again: someone else repeated it
+                        pendingRelays[key]?.set(true)
+                        return@post
+                    }
                     trackBurst(m.text)
-                    addLog(LogEntry.Kind.RX, m.text, protocolId, payload.size, senderId = m.id)
+                    addLog(LogEntry.Kind.RX, m.text, protocolId, payload.size, senderId = m.id, via = m.via)
+                    if (relayForOthers && m.hops > 0) scheduleRelay(key, Wire.relay(m.id, m.seq, m.hops - 1, identity.id, m.text), protocolId)
                 }
                 is Wire.Parsed.Hello -> {
                     Log.i(TAG, "rx hello from ${IdentityStore.tagOf(m.id)}: ${m.name}")
@@ -335,6 +350,40 @@ class MainViewModel(app: Application) : AndroidViewModel(app), SoundLink.Callbac
     fun setName(name: String) {
         identity.rename(name)
         helloSentAt.clear()
+    }
+
+    // ---- relaying ------------------------------------------------------------------------
+
+    private fun seenKey(sender: Int, seq: Int, transfer: Boolean) = (sender shl 9) or (seq shl 1) or (if (transfer) 1 else 0)
+
+    /** Records the key; true if it had been heard within the last few minutes already. */
+    private fun markSeen(key: Int): Boolean {
+        val now = SystemClock.elapsedRealtime()
+        val it = seen.entries.iterator()
+        while (it.hasNext()) if (now - it.next().value > SEEN_FOR_MS) it.remove()
+        val dup = seen.containsKey(key)
+        seen[key] = now
+        return dup
+    }
+
+    /**
+     * Flooding with suppression: repeat after a random pause unless another phone repeats
+     * first, and only once the band is quiet.
+     */
+    private fun scheduleRelay(key: Int, frame: ByteArray, protocolId: Int) {
+        val cancelled = AtomicBoolean(false)
+        pendingRelays[key] = cancelled
+        val wait = RELAY_MIN_WAIT_MS + Random.nextLong(0, RELAY_JITTER_MS)
+        val vol = effectiveVolumeFor(protocolId)
+        link.post {
+            SystemClock.sleep(wait)
+            if (cancelled.get()) { Log.i(TAG, "relay suppressed, someone else repeated it"); return@post }
+            link.waitUntilQuiet(RELAY_QUIET_WAIT_MS)
+            if (cancelled.get()) return@post
+            Log.i(TAG, "relaying ${frame.size} B on ${Modem.protocolName(protocolId)}")
+            link.transmit(frame, protocolId, vol)
+            main.post { pendingRelays.remove(key) }
+        }
     }
 
     /** Introduce this phone now, on the text protocol. */
@@ -404,8 +453,19 @@ class MainViewModel(app: Application) : AndroidViewModel(app), SoundLink.Callbac
         }
         val kind = assembled.kind
         val content = assembled.content
-        Log.i(TAG, "transfer ${x.id} complete: kind $kind, ${content.size} B, from ${IdentityStore.tagOf(assembled.sender)}")
+        Log.i(TAG, "transfer ${x.id} complete: kind $kind, ${content.size} B, from ${IdentityStore.tagOf(assembled.sender)} seq ${assembled.msgSeq} hops ${assembled.hops}")
+        if (assembled.sender == identity.id) { log.removeAll { it.id == x.logId }; return }   // our own photo, forwarded back
         if (assembled.sender != 0) { noteSender(assembled.sender, protocolId); updateLog(x.logId) { it.with(senderId = assembled.sender) } }
+        val key = seenKey(assembled.sender, assembled.msgSeq, transfer = true)
+        if (markSeen(key)) { log.removeAll { it.id == x.logId }; return }   // already had this photo via another path
+        if (relayForOthers && assembled.hops > 0 && kind == Transfer.KIND_JPEG) {
+            main.postDelayed({
+                if (!busy) {
+                    Log.i(TAG, "forwarding photo from ${IdentityStore.tagOf(assembled.sender)}, ${assembled.hops - 1} hops left")
+                    startTransfer(kind, content, "", null, origin = assembled.sender, msgSeq = assembled.msgSeq, hops = assembled.hops - 1)
+                }
+            }, RELAY_MIN_WAIT_MS + Random.nextLong(0, RELAY_JITTER_MS))
+        }
         when (kind) {
             Transfer.KIND_JPEG -> {
                 val bmp = BitmapFactory.decodeByteArray(content, 0, content.size)
@@ -448,14 +508,18 @@ class MainViewModel(app: Application) : AndroidViewModel(app), SoundLink.Callbac
         startTransfer(Transfer.KIND_JPEG, jpeg, "photo ${small.width}×${small.height}", small)
     }
 
-    private fun startTransfer(kind: Int, content: ByteArray, label: String, preview: Bitmap?) {
+    private fun startTransfer(
+        kind: Int, content: ByteArray, label: String, preview: Bitmap?,
+        origin: Int = identity.id, msgSeq: Int = identity.nextSeq(), hops: Int = HOP_BUDGET,
+    ) {
         val pid = photoProtocolId
         val id = Random.nextInt(256)
-        val chunks = Transfer.chunks(id, kind, identity.id, content)
+        val chunks = Transfer.chunks(id, kind, origin, msgSeq, hops, content)
         if (chunks == null) { status = "Too large to send (${content.size} B)"; return }
         val vol = effectiveVolumeFor(pid)
         val perChunk = Modem.airtime(pid, Transfer.MAX_FRAME) ?: 3f
-        val logId = addLog(LogEntry.Kind.TX, "", pid, content.size, image = preview,
+        val forwarded = origin != identity.id
+        val logId = addLog(if (forwarded) LogEntry.Kind.INFO else LogEntry.Kind.TX, if (forwarded) "Forwarding ${identity.nameFor(origin)}'s photo for others" else "", pid, content.size, image = preview,
             progress = "sending, about ${(chunks.size * (perChunk + 0.4f)).toInt()} s", fraction = 0f)
         transferring = true
         status = null
@@ -534,9 +598,9 @@ class MainViewModel(app: Application) : AndroidViewModel(app), SoundLink.Callbac
 
     // ---- helpers ------------------------------------------------------------------------
 
-    private fun addLog(kind: LogEntry.Kind, text: String, protocolId: Int, bytes: Int, image: Bitmap? = null, progress: String? = null, fraction: Float? = null, senderId: Int? = null): Long {
+    private fun addLog(kind: LogEntry.Kind, text: String, protocolId: Int, bytes: Int, image: Bitmap? = null, progress: String? = null, fraction: Float? = null, senderId: Int? = null, via: Int? = null): Long {
         val id = nextLogId++
-        log.add(0, LogEntry(id, clock.format(Date()), kind, text, Modem.protocolName(protocolId), bytes, image, progress, fraction, senderId))
+        log.add(0, LogEntry(id, clock.format(Date()), kind, text, Modem.protocolName(protocolId), bytes, image, progress, fraction, senderId, via))
         while (log.size > MAX_LOG) log.removeAt(log.size - 1)
         return id
     }
@@ -585,6 +649,11 @@ class MainViewModel(app: Application) : AndroidViewModel(app), SoundLink.Callbac
         private const val MAX_ROUNDS = 6
         private const val UPDATE_CHECK_EVERY_MS = 6 * 60 * 60 * 1000L
         private const val HELLO_EVERY_MS = 60_000L
+        private const val HOP_BUDGET = 2
+        private const val SEEN_FOR_MS = 10 * 60 * 1000L
+        private const val RELAY_MIN_WAIT_MS = 1_000L
+        private const val RELAY_JITTER_MS = 2_000L
+        private const val RELAY_QUIET_WAIT_MS = 6_000L
         private const val MAX_LOG = 200
         private val BURST_REGEX = Regex("^TB(\\d\\d)/(\\d\\d):")
 

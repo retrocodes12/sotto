@@ -104,6 +104,13 @@ fun SettingsSheet(vm: MainViewModel, onDismiss: () -> Unit) {
             }
             Rule()
 
+            SwitchRow(
+                "Repeat for others",
+                if (vm.relayForOthers) "Messages this phone hears are played again once, so phones out of the sender's reach still get them." else "This phone keeps what it hears to itself.",
+                vm.relayForOthers,
+            ) { vm.relayForOthers = it }
+            Rule()
+
             SwitchRow("Listening", if (vm.captureSource != null) "Mic on, ${vm.captureSource}" else "Off. Nothing arrives while off.", vm.wantListening) { vm.setListening(it) }
             Rule()
 

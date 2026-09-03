@@ -38,6 +38,13 @@ class IdentityStore(context: Context) {
 
     val tag: String get() = tagOf(id)
 
+    /** Next per-install message number (0..255), so relays and receivers can tell copies apart. */
+    fun nextSeq(): Int {
+        val n = (prefs.getInt("seq", 0) + 1) and 0xFF
+        prefs.edit().putInt("seq", n).apply()
+        return n
+    }
+
     fun rename(value: String) {
         name = value.trim().take(MAX_NAME)
         prefs.edit().putString("name", name).apply()
@@ -77,20 +84,27 @@ class IdentityStore(context: Context) {
  * Framing for text and hellos. A tag byte that cannot begin UTF-8 text marks our frames;
  * anything else is shown as plain text from an unknown sender (ggwave's other apps).
  *
- *   TEXT   A1 | idHi | idLo | utf-8
- *   HELLO  A2 | idHi | idLo | name (utf-8, at most 24 bytes)
+ *   TEXT   A1 | idHi idLo | seq | hopsLeft | utf-8                  as sent by its author
+ *   RELAY  A4 | idHi idLo | seq | hopsLeft | viaHi viaLo | utf-8    repeated by another phone
+ *   HELLO  A2 | idHi idLo | name (utf-8, at most 24 bytes)
  */
 object Wire {
     private const val TAG_TEXT = 0xA1
     private const val TAG_HELLO = 0xA2
+    private const val TAG_RELAY = 0xA4
 
     sealed class Parsed {
-        class Text(val id: Int, val text: String) : Parsed()
+        class Text(val id: Int, val seq: Int, val hops: Int, val text: String, val via: Int?) : Parsed()
         class Hello(val id: Int, val name: String) : Parsed()
         class Plain(val text: String) : Parsed()
     }
 
-    fun text(id: Int, text: String): ByteArray = byteArrayOf(TAG_TEXT.toByte(), (id shr 8).toByte(), id.toByte()) + text.toByteArray(Charsets.UTF_8)
+    fun text(id: Int, seq: Int, hops: Int, text: String): ByteArray =
+        byteArrayOf(TAG_TEXT.toByte(), (id shr 8).toByte(), id.toByte(), seq.toByte(), hops.toByte()) + text.toByteArray(Charsets.UTF_8)
+
+    fun relay(id: Int, seq: Int, hops: Int, via: Int, text: String): ByteArray =
+        byteArrayOf(TAG_RELAY.toByte(), (id shr 8).toByte(), id.toByte(), seq.toByte(), hops.toByte(), (via shr 8).toByte(), via.toByte()) +
+            text.toByteArray(Charsets.UTF_8)
 
     fun hello(id: Int, name: String): ByteArray {
         var n = name.toByteArray(Charsets.UTF_8)
@@ -98,11 +112,14 @@ object Wire {
         return byteArrayOf(TAG_HELLO.toByte(), (id shr 8).toByte(), id.toByte()) + n
     }
 
+    private fun u16(p: ByteArray, at: Int) = ((p[at].toInt() and 0xFF) shl 8) or (p[at + 1].toInt() and 0xFF)
+
     fun parse(p: ByteArray): Parsed {
         if (p.size >= 3) {
-            val id = ((p[1].toInt() and 0xFF) shl 8) or (p[2].toInt() and 0xFF)
+            val id = u16(p, 1)
             when (p[0].toInt() and 0xFF) {
-                TAG_TEXT -> return Parsed.Text(id, String(p, 3, p.size - 3, Charsets.UTF_8))
+                TAG_TEXT -> if (p.size >= 5) return Parsed.Text(id, p[3].toInt() and 0xFF, p[4].toInt() and 0xFF, String(p, 5, p.size - 5, Charsets.UTF_8), null)
+                TAG_RELAY -> if (p.size >= 7) return Parsed.Text(id, p[3].toInt() and 0xFF, p[4].toInt() and 0xFF, String(p, 7, p.size - 7, Charsets.UTF_8), u16(p, 5))
                 TAG_HELLO -> return Parsed.Hello(id, String(p, 3, p.size - 3, Charsets.UTF_8).trim())
             }
         }

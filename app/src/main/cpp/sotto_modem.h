@@ -60,6 +60,9 @@ public:
     // Rough heap use, for the README's honesty table.
     size_t heapBytes() const;
 
+    // True while a frame is being received (sync found, header or data in progress).
+    bool receiving() const { return m_state != State::Idle; }
+
     // Optional: one line per notable event (sync found, header/parity/crc failure).
     std::function<void(const char *)> onDebug;
 

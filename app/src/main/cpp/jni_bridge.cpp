@@ -174,6 +174,15 @@ Java_com_sotto_Modem_nativeTakePending(JNIEnv * env, jclass, jlong handle) {
     return e ? takePending(env, e) : nullptr;
 }
 
+// True while any Sotto decoder is in the middle of a frame: listen-before-talk for relays.
+JNIEXPORT jboolean JNICALL
+Java_com_sotto_Modem_nativeReceiving(JNIEnv *, jclass, jlong handle) {
+    auto * e = engineOf(handle);
+    if (e == nullptr) return JNI_FALSE;
+    for (auto & dec : e->sottoRx) if (dec->receiving()) return JNI_TRUE;
+    return JNI_FALSE;
+}
+
 JNIEXPORT jint JNICALL
 Java_com_sotto_Modem_nativeLastRxProtocolId(JNIEnv *, jclass, jlong handle) {
     auto * e = engineOf(handle);

@@ -145,6 +145,11 @@ payloads.
   (`UNPROCESSED`, `VOICE_RECOGNITION` or `MIC`).
 - **Message** box with a byte counter and, for Sotto protocols, the seconds of audio the
   draft will take. Send greys out above 100 bytes.
+- **Phones repeat for each other.** A phone that hears a message plays it again once, after a
+  random pause and only when the band is quiet, unless another phone repeats it first. Two
+  hops by default, so a phone in the doorway carries a message into the next room. Relayed
+  tiles say "via" whoever repeated them. Photos are forwarded whole, hop by hop, after the
+  relay has received them completely. Settings can switch a phone's repeating off.
 - **Silent messages** on by default: text goes on ultrasound, photos on Near (audible, at
   arm's length). Settings can switch messages to the audible Fast band for range, or pin
   any protocol for everything. Loudness slider defaults to full; ggwave protocols are

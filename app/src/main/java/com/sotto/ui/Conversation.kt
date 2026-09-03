@@ -87,7 +87,7 @@ fun ConversationScreen(vm: MainViewModel) {
                     contentPadding = PaddingValues(horizontal = 16.dp, vertical = 12.dp),
                     verticalArrangement = Arrangement.spacedBy(10.dp),
                 ) {
-                    items(vm.log, key = { it.id }) { MessageTile(it, vm.identity.nameFor(it.senderId)) }
+                    items(vm.log, key = { it.id }) { MessageTile(it, vm.identity.nameFor(it.senderId), it.via?.let { v -> vm.identity.nameFor(v) }) }
                 }
             }
             vm.status?.let { Note(it, error = true) }
@@ -141,8 +141,11 @@ private fun EmptyState(modifier: Modifier) {
 }
 
 @Composable
-private fun MessageTile(e: LogEntry, sender: String?) {
-    if (e.kind == LogEntry.Kind.INFO) { Note(e.text); return }
+private fun MessageTile(e: LogEntry, sender: String?, via: String?) {
+    if (e.kind == LogEntry.Kind.INFO) {
+        Note(e.progress?.let { "${e.text}, $it" } ?: e.text)
+        return
+    }
     val out = e.kind == LogEntry.Kind.TX
     val tile = if (out) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceVariant
     val ink = if (out) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurface
@@ -177,6 +180,7 @@ private fun MessageTile(e: LogEntry, sender: String?) {
         }
         val caption = buildString {
             append(e.time.substring(0, 5))
+            via?.let { append(" · via "); append(it) }
             e.progress?.let { append(" · "); append(it) } ?: run {
                 if (e.bytes > 0) { append(" · "); append(if (e.bytes >= 1000) "%.1f KB".format(e.bytes / 1000f) else "${e.bytes} B") }
                 if (e.protocol.startsWith("ggwave")) { append(" · "); append(e.protocol) }
