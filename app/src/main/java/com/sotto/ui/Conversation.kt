@@ -133,9 +133,16 @@ private fun Header(vm: MainViewModel, onSettings: () -> Unit) {
                     Icon(Icons.Outlined.Lock, contentDescription = null, tint = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.size(13.dp))
                     Spacer(Modifier.width(6.dp))
                     Text(
-                        if (vm.hasKeyFor(chat)) "private · only ${vm.identity.nameFor(chat)} can read this · ${com.sotto.IdentityStore.tagOf(chat)}" else "getting ${vm.identity.nameFor(chat)}'s key by sound…",
+                        if (vm.hasKeyFor(chat)) "private · their key ${vm.fingerprintOf(chat)} · yours ${vm.myFingerprint}" else "getting ${vm.identity.nameFor(chat)}'s key by sound…",
                         style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
+                }
+                if (vm.pendingKeys.containsKey(chat)) {
+                    Row(Modifier.padding(top = 6.dp), verticalAlignment = Alignment.CenterVertically) {
+                        Text("Their key changed. Compare fingerprints out loud first.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error, modifier = Modifier.weight(1f))
+                        TextButton(onClick = { vm.acceptNewKey(chat) }) { Text("Accept", color = MaterialTheme.colorScheme.onBackground) }
+                        TextButton(onClick = { vm.rejectNewKey(chat) }) { Text("Ignore", color = MaterialTheme.colorScheme.onSurfaceVariant) }
+                    }
                 }
             }
         }

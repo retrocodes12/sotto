@@ -28,6 +28,9 @@ class Modem(sampleRate: Int, samplesPerFrame: Int = SAMPLES_PER_FRAME) : AutoClo
 
     fun takePending(): ByteArray? = nativeTakePending(handle)
 
+    /** Drops any frame in progress; called after this phone's own transmission. */
+    fun reset() = nativeReset(handle)
+
     /** True while a frame is being received; relays wait for this to clear. */
     val receiving: Boolean get() = nativeReceiving(handle)
 
@@ -104,6 +107,7 @@ class Modem(sampleRate: Int, samplesPerFrame: Int = SAMPLES_PER_FRAME) : AutoClo
         @JvmStatic private external fun nativeDecode(handle: Long, samples: ShortArray, count: Int): ByteArray?
         @JvmStatic private external fun nativeTakePending(handle: Long): ByteArray?
         @JvmStatic private external fun nativeReceiving(handle: Long): Boolean
+        @JvmStatic private external fun nativeReset(handle: Long)
         @JvmStatic private external fun nativeLastRxSnr(handle: Long): Float
         @JvmStatic private external fun nativeLastRxProtocolId(handle: Long): Int
         @JvmStatic private external fun nativeSottoProtocolIds(): IntArray

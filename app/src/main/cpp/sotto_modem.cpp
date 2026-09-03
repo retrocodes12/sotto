@@ -495,10 +495,10 @@ bool Decoder::finishFrame(const OnMessage & onMessage) {
     for (int i = 0; i < m_frameSymbols; ++i) if (m_conf[i] < kEraseRatio) ++doubtful;
 
     std::vector<uint8_t> era = erasuresFor(doubtful, kEraseRatio);
-    if (!era.empty() && static_cast<int>(era.size()) <= par && tryDecode(m_syms, era, out)) { debugStats("decoded", era.size()); onMessage(out.data() + 1, m_payloadLen); return true; }
+    if (!era.empty() && static_cast<int>(era.size()) < par && tryDecode(m_syms, era, out)) { debugStats("decoded", era.size()); onMessage(out.data() + 1, m_payloadLen); return true; }
     for (int share : { 4, 2, 1 }) {   // a quarter, half, then most of the parity spent on erasures
         era = erasuresFor(par / share, kEraseRatio);
-        if (!era.empty() && static_cast<int>(era.size()) <= par && tryDecode(m_syms, era, out)) { debugStats("decoded (fewer erasures)", era.size()); onMessage(out.data() + 1, m_payloadLen); return true; }
+        if (!era.empty() && static_cast<int>(era.size()) < par && tryDecode(m_syms, era, out)) { debugStats("decoded (fewer erasures)", era.size()); onMessage(out.data() + 1, m_payloadLen); return true; }
     }
     if (tryDecode(m_syms, {}, out)) { debugStats("decoded (no erasures)", 0); onMessage(out.data() + 1, m_payloadLen); return true; }
 

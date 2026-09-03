@@ -47,14 +47,18 @@ class SoundLink(context: Context, private val callbacks: Callbacks) {
     private val txExecutor = Executors.newSingleThreadExecutor { r -> Thread(r, "sotto-tx") }
 
     private val decodeMuted = AtomicBoolean(false)
-    private val captureRunning = AtomicBoolean(false)
+    /** Set after each transmission so the capture thread clears half-read frames once it decodes again. */
+    private val needsReset = AtomicBoolean(false)
+    /** Each capture thread gets its own flag, so a thread that outlives a stop can never be re-armed. */
+    @Volatile private var run: AtomicBoolean? = null
     @Volatile private var captureThread: Thread? = null
 
     /** Call from the main thread. Any previous capture thread is stopped and joined first. */
     fun startListening() {
         stopListening()
-        captureRunning.set(true)
-        captureThread = Thread({ captureLoop() }, "sotto-capture").apply {
+        val flag = AtomicBoolean(true)
+        run = flag
+        captureThread = Thread({ captureLoop(flag) }, "sotto-capture").apply {
             priority = Thread.MAX_PRIORITY
             start()
         }
@@ -62,9 +66,10 @@ class SoundLink(context: Context, private val callbacks: Callbacks) {
 
     /** Stops the capture thread and waits for it. It exits within one frame read (about 21 ms). */
     fun stopListening() {
-        captureRunning.set(false)
+        run?.set(false)
         captureThread?.let { if (it !== Thread.currentThread()) it.join(1000) }
         captureThread = null
+        run = null
     }
 
     /** Runs [task] on the transmit thread. Call [transmit] from inside it. */
@@ -92,6 +97,7 @@ class SoundLink(context: Context, private val callbacks: Callbacks) {
             Log.e(TAG, "playback failed", e)
         } finally {
             SystemClock.sleep(RESUME_GUARD_MS)
+            needsReset.set(true)
             decodeMuted.set(false)
             callbacks.onTransmitting(false)
         }
@@ -106,7 +112,7 @@ class SoundLink(context: Context, private val callbacks: Callbacks) {
         val until = SystemClock.elapsedRealtime() + maxWaitMs
         var quietFor = 0L
         while (SystemClock.elapsedRealtime() < until) {
-            if (captureRunning.get() && modem.receiving) quietFor = 0 else quietFor += 50
+            if (run?.get() == true && modem.receiving) quietFor = 0 else quietFor += 50
             if (quietFor >= 250) return true
             SystemClock.sleep(50)
         }
@@ -135,10 +141,10 @@ class SoundLink(context: Context, private val callbacks: Callbacks) {
 
     // ---- capture -------------------------------------------------------------------------
 
-    private fun captureLoop() {
+    private fun captureLoop(flag: AtomicBoolean) {
         val opened = openRecorder()
         if (opened == null) {
-            captureRunning.set(false)
+            flag.set(false)
             callbacks.onCaptureStopped("Could not open the microphone at 48 kHz mono")
             return
         }
@@ -157,7 +163,7 @@ class SoundLink(context: Context, private val callbacks: Callbacks) {
             var reads = 0
             var energy = 0.0
             var energyCount = 0
-            while (captureRunning.get()) {
+            while (flag.get()) {
                 val n = record.read(frame, 0, frame.size, AudioRecord.READ_BLOCKING)
                 if (n <= 0) {
                     if (n == AudioRecord.ERROR_DEAD_OBJECT || n == AudioRecord.ERROR_INVALID_OPERATION) {
@@ -181,6 +187,7 @@ class SoundLink(context: Context, private val callbacks: Callbacks) {
                 }
 
                 if (!decodeMuted.get()) {
+                    if (needsReset.getAndSet(false)) modem.reset()
                     var payload = modem.decode(frame, n)
                     while (payload != null) {
                         callbacks.onMessage(payload, modem.lastRxProtocolId, modem.lastRxSnr)
@@ -195,7 +202,7 @@ class SoundLink(context: Context, private val callbacks: Callbacks) {
             runCatching { record.stop() }
             record.release()
             effects.forEach { runCatching { it.release() } }
-            captureRunning.set(false)
+            flag.set(false)
             callbacks.onCaptureStopped(reason)
         }
     }

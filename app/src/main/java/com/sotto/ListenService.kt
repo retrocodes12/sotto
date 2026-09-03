@@ -1,6 +1,9 @@
 package com.sotto
 
+import android.Manifest
 import android.app.Notification
+import android.content.pm.PackageManager
+import androidx.core.content.ContextCompat
 import android.app.PendingIntent
 import android.app.Service
 import android.content.Context
@@ -26,6 +29,13 @@ class ListenService : Service() {
             stopSelf()
             return START_NOT_STICKY
         }
+        // A sticky restart after the process was killed: no engine is listening yet, and the
+        // microphone permission may have been taken away in the meantime.
+        val restarted = intent == null
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
+            stopSelf()
+            return START_NOT_STICKY
+        }
         val open = PendingIntent.getActivity(this, 0, Intent(this, MainActivity::class.java), PendingIntent.FLAG_IMMUTABLE)
         val stop = PendingIntent.getService(this, 1, Intent(this, ListenService::class.java).setAction(ACTION_STOP), PendingIntent.FLAG_IMMUTABLE)
         val n: Notification = NotificationCompat.Builder(this, SottoApplication.CHANNEL_LISTENING)
@@ -38,13 +48,19 @@ class ListenService : Service() {
             .setSilent(true)
             .setPriority(NotificationCompat.PRIORITY_LOW)
             .build()
-        ServiceCompat.startForeground(
-            this, NOTIFICATION_ID, n,
-            if (Build.VERSION.SDK_INT >= 29) ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE else 0,
-        )
+        try {
+            ServiceCompat.startForeground(
+                this, NOTIFICATION_ID, n,
+                if (Build.VERSION.SDK_INT >= 29) ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE else 0,
+            )
+        } catch (e: Exception) {   // background start refused, or a permission changed under us
+            stopSelf()
+            return START_NOT_STICKY
+        }
         if (wakeLock == null) {
             wakeLock = getSystemService(PowerManager::class.java).newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "sotto:listen").also { it.acquire() }
         }
+        if (restarted) (application as SottoApplication).engine.setListening(true)
         return START_STICKY
     }
 

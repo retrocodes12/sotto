@@ -66,6 +66,10 @@ public:
     // Mean tone level over noise floor, in dB, of the last frame this decoder delivered.
     float lastSnrDb() const { return m_lastSnrDb; }
 
+    // Drop any frame in progress. Called after this phone's own transmission, whose
+    // muted stretch would otherwise leave a half-read frame waiting for symbols.
+    void clear() { reset(); }
+
     // Optional: one line per notable event (sync found, header/parity/crc failure).
     std::function<void(const char *)> onDebug;
 

@@ -46,19 +46,39 @@ class IdentityStore(context: Context) {
 
     /** Symmetric keys per peer, derived once their public key has arrived by sound. */
     val peerKeys = mutableStateMapOf<Int, ByteArray>()
+    /** The public keys themselves, for fingerprints. */
+    val peerPubs = mutableStateMapOf<Int, ByteArray>()
 
     init {
         runCatching {
             val j = JSONObject(prefs.getString("peerkeys", "{}") ?: "{}")
             for (k in j.keys()) peerKeys[k.toInt()] = Base64.decode(j.getString(k), Base64.NO_WRAP)
+            val pj = JSONObject(prefs.getString("peerpubs", "{}") ?: "{}")
+            for (k in pj.keys()) peerPubs[k.toInt()] = Base64.decode(pj.getString(k), Base64.NO_WRAP)
         }
     }
 
-    fun learnPublicKey(id: Int, pub: ByteArray) {
-        peerKeys[id] = Crypto.pairKey(Crypto.sharedSecret(privateKey, pub))
+    /** Derives the pair key. False for a public key that yields no usable secret. */
+    fun learnPublicKey(id: Int, pub: ByteArray): Boolean {
+        val shared = Crypto.sharedSecret(privateKey, pub) ?: return false
+        peerKeys[id] = Crypto.pairKey(shared)
+        peerPubs[id] = pub
         val j = JSONObject()
         for ((k, v) in peerKeys) j.put(k.toString(), Base64.encodeToString(v, Base64.NO_WRAP))
-        prefs.edit().putString("peerkeys", j.toString()).apply()
+        val pj = JSONObject()
+        for ((k, v) in peerPubs) pj.put(k.toString(), Base64.encodeToString(v, Base64.NO_WRAP))
+        prefs.edit().putString("peerkeys", j.toString()).putString("peerpubs", pj.toString()).putInt("rx$id", 0).apply()
+        return true
+    }
+
+    /** True if [pub] is the key we already hold for [id]. */
+    fun samePublicKey(id: Int, pub: ByteArray): Boolean = peerPubs[id]?.contentEquals(pub) == true
+
+    /** Highest message counter accepted from [peer]; anything at or below it is a replay. */
+    fun rxCounter(peer: Int): Int = prefs.getInt("rx$peer", 0)
+
+    fun acceptRxCounter(peer: Int, counter: Int) {
+        if (counter > rxCounter(peer)) prefs.edit().putInt("rx$peer", counter).apply()
     }
 
     /** Next send counter towards [peer]; the AES-GCM nonce depends on it never repeating. */
@@ -77,7 +97,9 @@ class IdentityStore(context: Context) {
     }
 
     fun rename(value: String) {
-        name = value.trim().take(MAX_NAME)
+        val v = value.trim().take(MAX_NAME)
+        if (v.isEmpty()) return
+        name = v
         prefs.edit().putString("name", name).apply()
     }
 

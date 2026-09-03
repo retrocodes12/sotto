@@ -80,7 +80,7 @@ fun SettingsSheet(vm: MainViewModel, onDismiss: () -> Unit) {
                 Spacer(Modifier.width(12.dp))
                 Text(vm.identity.tag, style = MaterialTheme.typography.titleMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
-            if (nameDraft.trim() != vm.identity.name) {
+            if (nameDraft.trim().isNotEmpty() && nameDraft.trim() != vm.identity.name) {
                 TextButton(onClick = { vm.setName(nameDraft); focus.clearFocus() }, contentPadding = androidx.compose.foundation.layout.PaddingValues(0.dp)) {
                     Text("Save name", color = MaterialTheme.colorScheme.onBackground, fontWeight = FontWeight.SemiBold)
                 }
@@ -306,7 +306,7 @@ private fun ago(t: Long): String {
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun ReachSheet(vm: MainViewModel, r: MainViewModel.Reach) {
-    ModalBottomSheet(onDismissRequest = { if (!r.running) vm.dismissReach() }, containerColor = MaterialTheme.colorScheme.background) {
+    ModalBottomSheet(onDismissRequest = { vm.dismissReach() }, containerColor = MaterialTheme.colorScheme.background) {
         Column(Modifier.padding(horizontal = 24.dp).padding(bottom = 32.dp)) {
             Text("Reach", style = MaterialTheme.typography.displayMedium)
             Spacer(Modifier.height(6.dp))

@@ -80,13 +80,17 @@ class MainViewModel(app: Application) : AndroidViewModel(app), SoundLink.Callbac
 
     fun keepListeningInBackground(on: Boolean) {
         listenInBackground = on
-        if (!on && !inForeground) { link.stopListening(); ListenService.stop(getApplication()) }
-        if (on && wantListening) ListenService.start(getApplication())
+        if (!on) {
+            ListenService.stop(getApplication())
+            if (!inForeground) link.stopListening()
+        } else if (wantListening) {
+            ListenService.start(getApplication())
+        }
     }
 
     /** A link, Wi-Fi network or contact, always on Near: one frame, arm's length, audible. */
     fun sendCard(kind: Int, fields: List<String>) {
-        if (busy) return
+        if (transferring || burstSending) { status = "Wait, still sending."; return }
         val clean = fields.map { it.trim().replace('\u001F', ' ') }
         val frame = Wire.card(identity.id, identity.nextSeq(), kind, clean)
         if (frame.size > Transfer.MAX_FRAME) { status = "That is too long to fit in one card."; return }
@@ -109,6 +113,8 @@ class MainViewModel(app: Application) : AndroidViewModel(app), SoundLink.Callbac
     class Reach(val started: Long) {
         var probesSent by mutableIntStateOf(0)
         var running by mutableStateOf(true)
+        /** Sequence numbers this test used; replies to older probes are ignored. */
+        val seqs = HashSet<Int>()
         /** peer -> SNRs in dB: theirs of our probe, and ours of their reply. */
         val heard = mutableStateMapOf<Int, List<Int>>()
     }
@@ -127,7 +133,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app), SoundLink.Callbac
         link.post {
             for (k in 0 until REACH_PROBES) {
                 val seq = (base + k) and 0xFF
-                main.post { reachSeq = seq }
+                main.post { reachSeq = seq; r.seqs.add(seq) }
                 link.waitUntilQuiet(RELAY_QUIET_WAIT_MS)
                 link.transmit(Wire.probe(identity.id, seq), pid, vol)
                 main.post { r.probesSent = k + 1 }
@@ -152,6 +158,24 @@ class MainViewModel(app: Application) : AndroidViewModel(app), SoundLink.Callbac
         }
         return bar to text
     }
+
+    /** Keys offered for someone we already hold a key for, until the user accepts one. */
+    val pendingKeys = mutableStateMapOf<Int, ByteArray>()
+
+    fun acceptNewKey(peer: Int) {
+        val pub = pendingKeys.remove(peer) ?: return
+        if (identity.learnPublicKey(peer, pub)) {
+            addLog(LogEntry.Kind.INFO, "Now using ${identity.nameFor(peer)}'s new key.", textProtocolId, 0, peer = peer)
+            keySentAt.remove(peer)
+            sendKey(peer)
+        }
+    }
+
+    fun rejectNewKey(peer: Int) { pendingKeys.remove(peer) }
+
+    /** Fingerprint of a peer's key, for reading out loud across the room. */
+    fun fingerprintOf(peer: Int): String? = identity.peerPubs[peer]?.let { Crypto.fingerprint(it) }
+    val myFingerprint: String get() = Crypto.fingerprint(identity.publicKey)
 
     /** Private chats. [openChat] is the peer whose chat is on screen; null is the room. */
     var openChat by mutableStateOf<Int?>(null)
@@ -183,7 +207,18 @@ class MainViewModel(app: Application) : AndroidViewModel(app), SoundLink.Callbac
         override fun run() {
             clockTick++
             maybeChirp()
+            abandonStaleTransfers()
             main.postDelayed(this, PRESENCE_TICK_MS)
+        }
+    }
+
+    /** Drops transfers whose sender has clearly given up, so their id can be reused. */
+    private fun abandonStaleTransfers() {
+        val now = SystemClock.elapsedRealtime()
+        val stale = incoming.values.filter { !it.complete && now - it.lastAt > INCOMING_ABANDON_MS }
+        for (x in stale) {
+            incoming.remove(x.id)
+            if (x.logId != 0L) updateLog(x.logId) { it.with(text = "photo did not finish", progress = null, fraction = null) }
         }
     }
 
@@ -210,8 +245,8 @@ class MainViewModel(app: Application) : AndroidViewModel(app), SoundLink.Callbac
 
 
     /** (sender, seq) pairs heard recently: shown once, repeated at most once. */
-    private val seen = LinkedHashMap<Int, Long>()
-    private val pendingRelays = HashMap<Int, AtomicBoolean>()
+    private val seen = LinkedHashMap<Long, Long>()
+    private val pendingRelays = HashMap<Long, AtomicBoolean>()
     private val clock = SimpleDateFormat("HH:mm:ss", Locale.US)
 
     /** What the user asked for. The switch reflects this; [captureSource] says whether it is up. */
@@ -279,8 +314,12 @@ class MainViewModel(app: Application) : AndroidViewModel(app), SoundLink.Callbac
     val draftBytes: Int
         get() = draft.toByteArray(Charsets.UTF_8).size
 
+    /** A message handed to the transmit thread and not yet played. */
+    var sending by mutableStateOf(false)
+        private set
+
     val busy: Boolean
-        get() = transmitting || burstSending || transferring
+        get() = transmitting || burstSending || transferring || sending
 
     val canSend: Boolean
         get() = draftBytes in 1..MAX_BYTES && !busy && (openChat?.let { hasKeyFor(it) } ?: true)
@@ -291,7 +330,10 @@ class MainViewModel(app: Application) : AndroidViewModel(app), SoundLink.Callbac
 
     // ---- listening ----------------------------------------------------------------------
 
+    private var listeningDecided = false
+
     fun setListening(on: Boolean) {
+        listeningDecided = true
         wantListening = on
         status = null
         if (on) {
@@ -305,7 +347,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app), SoundLink.Callbac
 
     /** The conversation screen calls this once the mic permission exists: listening is the default. */
     fun ensureListening() {
-        if (!wantListening && captureSource == null) setListening(true)
+        if (!listeningDecided && !wantListening && captureSource == null) setListening(true)
         if (!announced && identity.name.isNotEmpty()) {
             announced = true
             main.postDelayed({ announce() }, 2500)
@@ -357,7 +399,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app), SoundLink.Callbac
     /** Android blocks background mic access anyway; stop cleanly and resume on return. */
     fun onForeground() {
         inForeground = true
-        if (wantListening) link.startListening()
+        if (wantListening && captureSource == null) link.startListening()
         if (SystemClock.elapsedRealtime() - lastUpdateCheck > UPDATE_CHECK_EVERY_MS) checkForUpdates(manual = false)
     }
 
@@ -441,11 +483,14 @@ class MainViewModel(app: Application) : AndroidViewModel(app), SoundLink.Callbac
         val pid = textProtocolId
         val vol = effectiveVolumeFor(pid)
         status = null
+        sending = true
+        draft = ""
         link.post {
             val ok = link.transmit(bytes, pid, vol)
             main.post {
-                if (ok) { addLog(LogEntry.Kind.TX, text, pid, bytes.size, peer = peer, seq = if (peer != null) seq else null); if (draft == text) draft = "" }
-                else status = "${Modem.protocolName(pid)} refused to encode ${bytes.size} bytes"
+                sending = false
+                if (ok) addLog(LogEntry.Kind.TX, text, pid, bytes.size, peer = peer, seq = if (peer != null) seq else null)
+                else { status = "${Modem.protocolName(pid)} refused to encode ${bytes.size} bytes"; if (draft.isEmpty()) draft = text }
             }
         }
     }
@@ -552,6 +597,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app), SoundLink.Callbac
                     if (m.from == identity.id || m.to != identity.id) return@post
                     noteSender(m.from, protocolId)
                     reach?.let { r ->
+                        if (m.seq !in r.seqs) return@let
                         val ours = lastSnrDb.toInt().coerceIn(0, 255)
                         r.heard[m.from] = (r.heard[m.from] ?: emptyList()) + listOf(m.snrDb, ours)
                         Log.i(TAG, "reach reply from ${IdentityStore.tagOf(m.from)}: they heard ${m.snrDb} dB, we hear $ours dB")
@@ -559,7 +605,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app), SoundLink.Callbac
                 }
                 is Wire.Parsed.Ack -> {
                     if (m.from == identity.id) return@post
-                    val key = seenKey(m.from, m.seq, transfer = false, ack = true)
+                    val key = ackKey(m.from, m.to, m.seq)
                     if (markSeen(key)) { pendingRelays[key]?.set(true); return@post }
                     noteSender(m.from, protocolId)
                     // the target has it: any repeat of the message itself still pending here is pointless
@@ -576,10 +622,21 @@ class MainViewModel(app: Application) : AndroidViewModel(app), SoundLink.Callbac
                     if (m.from == identity.id) return@post
                     noteSender(m.from, protocolId)
                     if (m.to != identity.id) return@post
-                    val had = identity.peerKeys.containsKey(m.from)
-                    identity.learnPublicKey(m.from, m.publicKey)
-                    Log.i(TAG, "key from ${IdentityStore.tagOf(m.from)}${if (had) " (replaced)" else ""}")
-                    sendKey(m.from)   // answer with ours unless we just did
+                    when {
+                        identity.samePublicKey(m.from, m.publicKey) -> sendKey(m.from)
+                        identity.peerKeys.containsKey(m.from) -> {
+                            // A different key for someone we already know: could be a reinstall, could be
+                            // a phone in earshot pretending. Hold it until the user accepts it.
+                            pendingKeys[m.from] = m.publicKey
+                            Log.w(TAG, "key from ${IdentityStore.tagOf(m.from)} differs from the one we hold; waiting for the user")
+                            addLog(LogEntry.Kind.INFO, "${identity.nameFor(m.from)}'s key changed. Open the chat to compare fingerprints before accepting it.", protocolId, 0)
+                        }
+                        identity.learnPublicKey(m.from, m.publicKey) -> {
+                            Log.i(TAG, "key from ${IdentityStore.tagOf(m.from)}")
+                            sendKey(m.from)   // answer with ours unless we just did
+                        }
+                        else -> Log.w(TAG, "key from ${IdentityStore.tagOf(m.from)} rejected: no usable secret")
+                    }
                 }
                 is Wire.Parsed.Private -> {
                     if (m.from == identity.id) return@post
@@ -588,12 +645,15 @@ class MainViewModel(app: Application) : AndroidViewModel(app), SoundLink.Callbac
                     if (dup) { pendingRelays[key]?.set(true); return@post }
                     noteSender(m.from, protocolId, direct = true)
                     if (m.to == identity.id) {
+                        if (m.counter <= identity.rxCounter(m.from)) { Log.w(TAG, "replayed private message from ${IdentityStore.tagOf(m.from)} ignored"); return@post }
                         val k = identity.peerKeys[m.from]
                         val plain = k?.let { Crypto.decrypt(it, m.from, identity.id, m.counter, m.sealed) }
                         if (plain == null) {
                             Log.w(TAG, "private message from ${IdentityStore.tagOf(m.from)} could not be read")
-                            if (k == null) sendKey(m.from)
+                            addLog(LogEntry.Kind.INFO, "A private message from ${identity.nameFor(m.from)} could not be read. Their key may have changed.", protocolId, 0, peer = m.from)
+                            sendKey(m.from)
                         } else {
+                            identity.acceptRxCounter(m.from, m.counter)
                             val text = String(plain, Charsets.UTF_8)
                             Log.i(TAG, "rx private ${payload.size} B from ${IdentityStore.tagOf(m.from)}")
                             addLog(LogEntry.Kind.RX, text, protocolId, payload.size, senderId = m.from, peer = m.from)
@@ -663,10 +723,13 @@ class MainViewModel(app: Application) : AndroidViewModel(app), SoundLink.Callbac
 
     // ---- relaying ------------------------------------------------------------------------
 
-    private fun seenKey(sender: Int, seq: Int, transfer: Boolean, ack: Boolean = false) = (sender shl 10) or (seq shl 2) or (if (transfer) 1 else 0) or (if (ack) 2 else 0)
+    private fun seenKey(sender: Int, seq: Int, transfer: Boolean): Long = (sender.toLong() shl 10) or (seq.toLong() shl 2) or (if (transfer) 1L else 0L)
+
+    /** Receipts are keyed by acker, recipient and sequence: two senders may share a sequence number. */
+    private fun ackKey(from: Int, to: Int, seq: Int): Long = (from.toLong() shl 26) or (to.toLong() shl 10) or (seq.toLong() shl 2) or 2L
 
     /** Records the key; true if it had been heard within the last few minutes already. */
-    private fun markSeen(key: Int): Boolean {
+    private fun markSeen(key: Long): Boolean {
         val now = SystemClock.elapsedRealtime()
         val it = seen.entries.iterator()
         while (it.hasNext()) if (now - it.next().value > SEEN_FOR_MS) it.remove()
@@ -679,7 +742,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app), SoundLink.Callbac
      * Flooding with suppression: repeat after a random pause unless another phone repeats
      * first, and only once the band is quiet.
      */
-    private fun scheduleRelay(key: Int, frame: ByteArray, protocolId: Int) {
+    private fun scheduleRelay(key: Long, frame: ByteArray, protocolId: Int) {
         val cancelled = AtomicBoolean(false)
         pendingRelays[key] = cancelled
         val wait = RELAY_MIN_WAIT_MS + Random.nextLong(0, RELAY_JITTER_MS)
@@ -714,9 +777,14 @@ class MainViewModel(app: Application) : AndroidViewModel(app), SoundLink.Callbac
             else -> {}
         }
         val total = when (f) { is Transfer.Frame.Data -> f.total; is Transfer.Frame.End -> f.total; else -> return }
+        // A finished or differently-sized entry under this id belongs to an older transfer.
+        incoming[f.id]?.let { old -> if (old.total != total || (old.complete && f is Transfer.Frame.Data && f.seq == 0)) incoming.remove(f.id) }
         val x = incoming.getOrPut(f.id) {
+            val ownPhoto = f is Transfer.Frame.Data && f.seq == 0 && f.bytes.size >= 5 &&
+                (((f.bytes[3].toInt() and 0xFF) shl 8) or (f.bytes[4].toInt() and 0xFF)) == identity.id
             Transfer.Incoming(f.id, total).also {
-                it.logId = addLog(LogEntry.Kind.RX, "incoming photo", protocolId, 0, progress = "receiving, 0 of $total", fraction = 0f)
+                if (ownPhoto) it.complete = true   // our own photo coming back through a relay: answer DONE, show nothing
+                else it.logId = addLog(LogEntry.Kind.RX, "incoming photo", protocolId, 0, progress = "receiving, 0 of $total", fraction = 0f)
             }
         }
         x.lastAt = SystemClock.elapsedRealtime()
@@ -755,6 +823,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app), SoundLink.Callbac
 
     private fun finishIncoming(x: Transfer.Incoming, protocolId: Int) {
         x.complete = true
+        main.postDelayed({ if (incoming[x.id] === x) incoming.remove(x.id) }, INCOMING_FORGET_MS)
         val assembled = Transfer.assemble(x.parts.map { it!! })
         if (assembled == null) {
             updateLog(x.logId) { it.with(text = "transfer failed to assemble", progress = null) }
@@ -792,7 +861,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app), SoundLink.Callbac
 
     /** Downscales and JPEG-compresses the picked photo, then sends it on the current protocol. */
     fun sendPhoto(uri: Uri) {
-        if (busy) return
+        if (transferring || burstSending) { status = "Wait, still sending."; return }
         val app = getApplication<Application>()
         val bitmap = try {
             val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
@@ -893,6 +962,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app), SoundLink.Callbac
             if (reason != null) {
                 wantListening = false
                 status = reason
+                ListenService.stop(getApplication())
             }
         }
     }
@@ -942,9 +1012,13 @@ class MainViewModel(app: Application) : AndroidViewModel(app), SoundLink.Callbac
     }
 
     init {   // last: every property above is initialised by now
-        val restored = History.load(app)
-        log.addAll(restored)
-        nextLogId = (restored.maxOfOrNull { it.id } ?: 0L) + 1
+        io.execute {
+            val restored = runCatching { History.load(app) }.getOrDefault(emptyList())
+            main.post {
+                log.addAll(restored)   // newest first already; anything logged meanwhile stays on top
+                nextLogId = maxOf(nextLogId, (restored.maxOfOrNull { it.id } ?: 0L) + 1)
+            }
+        }
         main.postDelayed(presence, PRESENCE_TICK_MS)
     }
 
@@ -959,6 +1033,8 @@ class MainViewModel(app: Application) : AndroidViewModel(app), SoundLink.Callbac
         private const val PHOTO_MAX_SIDE = 160
         private const val PHOTO_QUALITY = 45
         private const val PHOTO_MAX_BYTES = 8_000
+        private const val INCOMING_FORGET_MS = 20_000L
+        private const val INCOMING_ABANDON_MS = 120_000L
         private const val REPLY_DELAY_MS = 700L
         private const val REPLY_TIMEOUT_MS = 9_000L
         private const val REPLY_RETRY_MS = 4_000L

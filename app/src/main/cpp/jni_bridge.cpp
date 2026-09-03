@@ -177,6 +177,15 @@ Java_com_sotto_Modem_nativeTakePending(JNIEnv * env, jclass, jlong handle) {
     return e ? takePending(env, e) : nullptr;
 }
 
+// Drops any frame in progress in every Sotto decoder and forgets undelivered messages.
+JNIEXPORT void JNICALL
+Java_com_sotto_Modem_nativeReset(JNIEnv *, jclass, jlong handle) {
+    auto * e = engineOf(handle);
+    if (e == nullptr) return;
+    for (auto & dec : e->sottoRx) dec->clear();
+    e->pending.clear();
+}
+
 // True while any Sotto decoder is in the middle of a frame: listen-before-talk for relays.
 JNIEXPORT jboolean JNICALL
 Java_com_sotto_Modem_nativeReceiving(JNIEnv *, jclass, jlong handle) {

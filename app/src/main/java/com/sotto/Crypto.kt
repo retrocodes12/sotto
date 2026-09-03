@@ -22,7 +22,16 @@ object Crypto {
 
     fun publicKey(priv: ByteArray): ByteArray = x25519(priv, BASE)
 
-    fun sharedSecret(priv: ByteArray, theirPub: ByteArray): ByteArray = x25519(priv, theirPub)
+    /** Null for a low-order point (an all-zero secret anyone could compute). */
+    fun sharedSecret(priv: ByteArray, theirPub: ByteArray): ByteArray? =
+        x25519(priv, theirPub).takeIf { s -> s.any { it.toInt() != 0 } }
+
+    /** Eight hex characters of SHA-256 of a public key, for reading out loud. */
+    fun fingerprint(pub: ByteArray): String {
+        val d = java.security.MessageDigest.getInstance("SHA-256").digest(pub)
+        val h = toHex(d.copyOf(4)).uppercase()
+        return h.substring(0, 4) + " " + h.substring(4)
+    }
 
     private fun le(b: ByteArray): BigInteger = BigInteger(1, b.reversedArray())
 

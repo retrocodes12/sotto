@@ -191,8 +191,9 @@ public:
             }
         }
 
-        // Too many errors
-        if(epos->length > ecc_length) return 1;
+        // Too many errors. Sotto patch: strictly fewer erasures than parity bytes; the
+        // errata evaluator's temporaries only hold ecc_length + errata + 1 coefficients.
+        if(epos->length >= ecc_length) return 1;
 
         Poly *synd   = &polynoms[ID_SYNDROMES];
         Poly *eloc   = &polynoms[ID_ERRORS_LOC];
@@ -216,7 +217,9 @@ public:
         if(!has_errors) goto return_corrected_msg;
 
         CalcForneySyndromes(synd, epos, src_len);
-        FindErrorLocator(forney, NULL, epos->length);
+        /* Sotto patch: the return value was ignored, so an uncorrectable codeword went on
+         * into FindErrors with a stale locator. */
+        if(!FindErrorLocator(forney, NULL, epos->length)) return 1;
 
         // Reversing syndrome
         // TODO optimize through special Poly flag
@@ -229,11 +232,19 @@ public:
         ok = FindErrors(reloc, src_len);
         if(!ok) return 1;
 
-        // Error happened while finding errors (so helpfull :D)
-        if(err->length == 0) return 1;
+        /* Sotto patch: no unmarked errors is fine when erasures were given; only an
+         * empty result with nothing marked means the search failed. */
+        if(err->length == 0 && epos->length == 0) return 1;
 
-        /* Adding found errors with known */
+        /* Adding found errors with known.
+         * Sotto patch: a found error at a position that is already an erasure makes the
+         * errata locator's derivative vanish and CorrectErrata divide by zero; such a
+         * codeword is uncorrectable. Also keep the list within the parity capacity. */
+        if(epos->length + err->length + 1 > ecc_length) return 1;   /* errata must stay below ecc_length */
         for(uint8_t i = 0; i < err->length; i++) {
+            for(uint8_t j = 0; j < epos->length; j++) {
+                if(epos->at(j) == err->at(i)) return 1;
+            }
             epos->Append(err->at(i));
         }
 
@@ -493,8 +504,11 @@ private:
         uint32_t shift = 0;
         while(err_loc->length && err_loc->at(shift) == 0) shift++;
 
-        uint32_t errs = err_loc->length - shift - 1;
-        if(((errs - erase_count) * 2 + erase_count) > ecc_length){
+        /* Sotto patch: signed arithmetic. With erasures and no unmarked errors, errs is
+         * smaller than erase_count and the original unsigned subtraction wrapped, so every
+         * erasures-only codeword was rejected as "too many errors". */
+        int32_t errs = (int32_t) err_loc->length - (int32_t) shift - 1;
+        if(errs < 0 || ((errs - (int32_t) erase_count) * 2 + (int32_t) erase_count) > (int32_t) ecc_length){
             return false; /* Error count is greater then we can fix! */
         }
 

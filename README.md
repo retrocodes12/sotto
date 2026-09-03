@@ -162,7 +162,10 @@ payloads.
   are then AES-256-GCM encrypted to that phone. Relays repeat them without being able to read
   them, and other phones show nothing. The room stays the broadcast it always was. The
   receiver answers each private message with a seven-byte receipt, so the sender's tile says
-  "delivered", and any relay still holding the message drops it.
+  "delivered", and any relay still holding the message drops it. A key that arrives for
+  someone whose key is already held is never swapped in silently: the chat shows both
+  fingerprints and asks, since anyone in earshot can play a KEY frame. Replayed private
+  messages are dropped by a per-peer counter.
 - **Who's in reach.** The status line under the wordmark says who is nearby: phones announce
   themselves with a hello when opened, chirp three bytes when they have been quiet for over a
   minute, and anyone heard directly in the last three minutes counts. Phones heard only through
