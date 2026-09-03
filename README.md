@@ -145,6 +145,10 @@ payloads.
   (`UNPROCESSED`, `VOICE_RECOGNITION` or `MIC`).
 - **Message** box with a byte counter and, for Sotto protocols, the seconds of audio the
   draft will take. Send greys out above 100 bytes.
+- **Private chats.** Tap a name to open a chat only that person can read. The two phones
+  swap X25519 public keys by sound once (about six seconds each way on ultrasound); messages
+  are then AES-256-GCM encrypted to that phone. Relays repeat them without being able to read
+  them, and other phones show nothing. The room stays the broadcast it always was.
 - **Who's in reach.** The status line under the wordmark says who is nearby: phones announce
   themselves with a hello when opened, chirp three bytes when they have been quiet for over a
   minute, and anyone heard directly in the last three minutes counts. Phones heard only through

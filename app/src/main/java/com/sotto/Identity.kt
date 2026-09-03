@@ -1,6 +1,7 @@
 package com.sotto
 
 import android.content.Context
+import android.util.Base64
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
@@ -37,6 +38,36 @@ class IdentityStore(context: Context) {
     }
 
     val tag: String get() = tagOf(id)
+
+    /** This install's X25519 keypair, made once. */
+    val privateKey: ByteArray = prefs.getString("priv", null)?.let { Base64.decode(it, Base64.NO_WRAP) }
+        ?: Crypto.newPrivateKey().also { prefs.edit().putString("priv", Base64.encodeToString(it, Base64.NO_WRAP)).apply() }
+    val publicKey: ByteArray by lazy { Crypto.publicKey(privateKey) }
+
+    /** Symmetric keys per peer, derived once their public key has arrived by sound. */
+    val peerKeys = mutableStateMapOf<Int, ByteArray>()
+
+    init {
+        runCatching {
+            val j = JSONObject(prefs.getString("peerkeys", "{}") ?: "{}")
+            for (k in j.keys()) peerKeys[k.toInt()] = Base64.decode(j.getString(k), Base64.NO_WRAP)
+        }
+    }
+
+    fun learnPublicKey(id: Int, pub: ByteArray) {
+        peerKeys[id] = Crypto.pairKey(Crypto.sharedSecret(privateKey, pub))
+        val j = JSONObject()
+        for ((k, v) in peerKeys) j.put(k.toString(), Base64.encodeToString(v, Base64.NO_WRAP))
+        prefs.edit().putString("peerkeys", j.toString()).apply()
+    }
+
+    /** Next send counter towards [peer]; the AES-GCM nonce depends on it never repeating. */
+    fun nextCounter(peer: Int): Int {
+        val key = "ctr$peer"
+        val n = prefs.getInt(key, 0) + 1
+        prefs.edit().putInt(key, n).apply()
+        return n
+    }
 
     /** Next per-install message number (0..255), so relays and receivers can tell copies apart. */
     fun nextSeq(): Int {
@@ -97,19 +128,37 @@ class IdentityStore(context: Context) {
  *   RELAY  A4 | idHi idLo | seq | hopsLeft | viaHi viaLo | utf-8    repeated by another phone
  *   HELLO  A2 | idHi idLo | name (utf-8, at most 24 bytes)
  *   HERE   A9 | idHi idLo                                     presence, when a phone has been quiet
+ *   KEY    AB | fromHi fromLo | toHi toLo | x25519 public key (32)
+ *   PRIV   AC | fromHi fromLo | toHi toLo | seq | hopsLeft | counter (4) | AES-GCM sealed text
  */
 object Wire {
     private const val TAG_TEXT = 0xA1
     private const val TAG_HELLO = 0xA2
     private const val TAG_RELAY = 0xA4
     private const val TAG_HERE = 0xA9
+    private const val TAG_KEY = 0xAB
+    private const val TAG_PRIVATE = 0xAC
 
     sealed class Parsed {
         class Text(val id: Int, val seq: Int, val hops: Int, val text: String, val via: Int?) : Parsed()
         class Hello(val id: Int, val name: String) : Parsed()
         class Here(val id: Int) : Parsed()
+        class Key(val from: Int, val to: Int, val publicKey: ByteArray) : Parsed()
+        class Private(val from: Int, val to: Int, val seq: Int, val hops: Int, val counter: Int, val sealed: ByteArray, val raw: ByteArray) : Parsed()
         class Plain(val text: String) : Parsed()
     }
+
+    fun key(from: Int, to: Int, publicKey: ByteArray): ByteArray =
+        byteArrayOf(TAG_KEY.toByte(), (from shr 8).toByte(), from.toByte(), (to shr 8).toByte(), to.toByte()) + publicKey
+
+    fun private(from: Int, to: Int, seq: Int, hops: Int, counter: Int, sealed: ByteArray): ByteArray =
+        byteArrayOf(
+            TAG_PRIVATE.toByte(), (from shr 8).toByte(), from.toByte(), (to shr 8).toByte(), to.toByte(), seq.toByte(), hops.toByte(),
+            (counter ushr 24).toByte(), (counter ushr 16).toByte(), (counter ushr 8).toByte(), counter.toByte(),
+        ) + sealed
+
+    /** The same private frame with one hop fewer, for relays that cannot read it. */
+    fun relayPrivate(raw: ByteArray): ByteArray = raw.copyOf().also { it[6] = (it[6] - 1).toByte() }
 
     fun here(id: Int): ByteArray = byteArrayOf(TAG_HERE.toByte(), (id shr 8).toByte(), id.toByte())
 
@@ -136,6 +185,12 @@ object Wire {
                 TAG_RELAY -> if (p.size >= 7) return Parsed.Text(id, p[3].toInt() and 0xFF, p[4].toInt() and 0xFF, String(p, 7, p.size - 7, Charsets.UTF_8), u16(p, 5))
                 TAG_HELLO -> return Parsed.Hello(id, String(p, 3, p.size - 3, Charsets.UTF_8).trim())
                 TAG_HERE -> return Parsed.Here(id)
+                TAG_KEY -> if (p.size == 5 + 32) return Parsed.Key(id, u16(p, 3), p.copyOfRange(5, 37))
+                TAG_PRIVATE -> if (p.size >= 11) return Parsed.Private(
+                    id, u16(p, 3), p[5].toInt() and 0xFF, p[6].toInt() and 0xFF,
+                    ((p[7].toInt() and 0xFF) shl 24) or ((p[8].toInt() and 0xFF) shl 16) or ((p[9].toInt() and 0xFF) shl 8) or (p[10].toInt() and 0xFF),
+                    p.copyOfRange(11, p.size), p,
+                )
             }
         }
         return Parsed.Plain(String(p, Charsets.UTF_8))

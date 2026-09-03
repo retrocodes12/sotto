@@ -12,6 +12,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateListOf
+import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.lifecycle.AndroidViewModel
@@ -37,13 +38,15 @@ class LogEntry(
     val fraction: Float? = null,
     val senderId: Int? = null,
     val via: Int? = null,
+    /** The other person of a private chat; null for the room. */
+    val peer: Int? = null,
 ) {
     enum class Kind { RX, TX, INFO }
 
     fun with(
         text: String = this.text, image: Bitmap? = this.image, progress: String? = this.progress,
         bytes: Int = this.bytes, fraction: Float? = this.fraction, senderId: Int? = this.senderId, via: Int? = this.via,
-    ) = LogEntry(id, time, kind, text, protocol, bytes, image, progress, fraction, senderId, via)
+    ) = LogEntry(id, time, kind, text, protocol, bytes, image, progress, fraction, senderId, via, peer)
 }
 
 /** Owns the [SoundLink] and exposes everything the UI shows as Compose state. */
@@ -56,6 +59,26 @@ class MainViewModel(app: Application) : AndroidViewModel(app), SoundLink.Callbac
 
     /** Repeat what this phone hears so phones out of earshot of the sender still get it. */
     var relayForOthers by mutableStateOf(true)
+
+    /** Private chats. [openChat] is the peer whose chat is on screen; null is the room. */
+    var openChat by mutableStateOf<Int?>(null)
+        private set
+    val unread = mutableStateMapOf<Int, Int>()
+    private val keySentAt = HashMap<Int, Long>()
+    val cryptoOk: Boolean = Crypto.selfTest().also { if (!it) Log.e(TAG, "X25519 self-test failed; private chat disabled") }
+
+    fun openChat(peer: Int?) {
+        openChat = peer
+        if (peer != null) {
+            unread.remove(peer)
+            if (!identity.peerKeys.containsKey(peer)) sendKey(peer)
+        }
+    }
+
+    /** People to offer chats with: anyone heard, most recent first. */
+    val chatPeers: List<Int> get() { clockTick; return identity.contacts.entries.sortedByDescending { it.value.lastHeard }.map { it.key } }
+
+    fun hasKeyFor(peer: Int) = identity.peerKeys.containsKey(peer)
 
     /** Ticks every few seconds so "nearby" counts and "x min ago" stay current on screen. */
     var clockTick by mutableIntStateOf(0)
@@ -100,7 +123,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app), SoundLink.Callbac
     val photoProtocolId: Int get() = if (autoProtocol) Modem.NEAR_PROTOCOL_ID else protocolId
 
     /** Seconds of audio the current draft would take. */
-    val draftSeconds: Float? get() = if (draftBytes == 0) null else Modem.airtime(textProtocolId, draftBytes + 3)
+    val draftSeconds: Float? get() = if (draftBytes == 0) null else Modem.airtime(textProtocolId, draftBytes + if (openChat == null) 5 else 23)
     var draft by mutableStateOf("")
     var mediaVolume by mutableFloatStateOf(1f)
         private set
@@ -148,7 +171,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app), SoundLink.Callbac
         get() = transmitting || burstSending || transferring
 
     val canSend: Boolean
-        get() = draftBytes in 1..MAX_BYTES && !busy
+        get() = draftBytes in 1..MAX_BYTES && !busy && (openChat?.let { hasKeyFor(it) } ?: true)
 
     /** Amplitude actually handed to the modem: ggwave's multi-tone sum clips above 25. */
     val effectiveTxVolume: Int
@@ -277,14 +300,21 @@ class MainViewModel(app: Application) : AndroidViewModel(app), SoundLink.Callbac
     fun send() {
         if (!canSend) return
         val text = draft
-        val bytes = Wire.text(identity.id, identity.nextSeq(), HOP_BUDGET, text)
+        val peer = openChat
+        val bytes = if (peer == null) {
+            Wire.text(identity.id, identity.nextSeq(), HOP_BUDGET, text)
+        } else {
+            val key = identity.peerKeys[peer] ?: run { status = "Still waiting for ${identity.nameFor(peer)}'s key."; sendKey(peer); return }
+            val ctr = identity.nextCounter(peer)
+            Wire.private(identity.id, peer, identity.nextSeq(), HOP_BUDGET, ctr, Crypto.encrypt(key, identity.id, peer, ctr, text.toByteArray(Charsets.UTF_8)))
+        }
         val pid = textProtocolId
         val vol = effectiveVolumeFor(pid)
         status = null
         link.post {
             val ok = link.transmit(bytes, pid, vol)
             main.post {
-                if (ok) { addLog(LogEntry.Kind.TX, text, pid, bytes.size); if (draft == text) draft = "" }
+                if (ok) { addLog(LogEntry.Kind.TX, text, pid, bytes.size, peer = peer); if (draft == text) draft = "" }
                 else status = "${Modem.protocolName(pid)} refused to encode ${bytes.size} bytes"
             }
         }
@@ -369,6 +399,37 @@ class MainViewModel(app: Application) : AndroidViewModel(app), SoundLink.Callbac
                 is Wire.Parsed.Here -> {
                     if (m.id != identity.id) noteSender(m.id, protocolId)
                 }
+                is Wire.Parsed.Key -> {
+                    if (m.from == identity.id) return@post
+                    noteSender(m.from, protocolId)
+                    if (m.to != identity.id) return@post
+                    val had = identity.peerKeys.containsKey(m.from)
+                    identity.learnPublicKey(m.from, m.publicKey)
+                    Log.i(TAG, "key from ${IdentityStore.tagOf(m.from)}${if (had) " (replaced)" else ""}")
+                    sendKey(m.from)   // answer with ours unless we just did
+                }
+                is Wire.Parsed.Private -> {
+                    if (m.from == identity.id) return@post
+                    val key = seenKey(m.from, m.seq, transfer = false)
+                    val dup = markSeen(key)
+                    if (dup) { pendingRelays[key]?.set(true); return@post }
+                    noteSender(m.from, protocolId, direct = true)
+                    if (m.to == identity.id) {
+                        val k = identity.peerKeys[m.from]
+                        val plain = k?.let { Crypto.decrypt(it, m.from, identity.id, m.counter, m.sealed) }
+                        if (plain == null) {
+                            Log.w(TAG, "private message from ${IdentityStore.tagOf(m.from)} could not be read")
+                            if (k == null) sendKey(m.from)
+                        } else {
+                            val text = String(plain, Charsets.UTF_8)
+                            Log.i(TAG, "rx private ${payload.size} B from ${IdentityStore.tagOf(m.from)}")
+                            addLog(LogEntry.Kind.RX, text, protocolId, payload.size, senderId = m.from, peer = m.from)
+                            if (openChat != m.from) unread[m.from] = (unread[m.from] ?: 0) + 1
+                        }
+                    } else if (relayForOthers && m.hops > 0) {
+                        scheduleRelay(key, Wire.relayPrivate(m.raw), protocolId)   // not for us: repeat it unread
+                    }
+                }
                 is Wire.Parsed.Plain -> {
                     Log.i(TAG, "rx ${Modem.protocolName(protocolId)} ${payload.size} B plain: ${m.text}")
                     trackBurst(m.text)
@@ -398,6 +459,18 @@ class MainViewModel(app: Application) : AndroidViewModel(app), SoundLink.Callbac
         val vol = effectiveVolumeFor(pid)
         val wait = REPLY_DELAY_MS + Random.nextLong(0, 900)
         link.post { SystemClock.sleep(wait); link.transmit(frame, pid, vol) }
+    }
+
+    /** Plays our public key for [peer], at most once a minute; they answer with theirs. */
+    private fun sendKey(peer: Int) {
+        if (!cryptoOk) return
+        val now = SystemClock.elapsedRealtime()
+        if (now - (keySentAt[peer] ?: 0L) < HELLO_EVERY_MS) return
+        keySentAt[peer] = now
+        val frame = Wire.key(identity.id, peer, identity.publicKey)
+        val pid = textProtocolId
+        val vol = effectiveVolumeFor(pid)
+        link.post { SystemClock.sleep(REPLY_DELAY_MS + Random.nextLong(0, 600)); link.waitUntilQuiet(RELAY_QUIET_WAIT_MS); link.transmit(frame, pid, vol) }
     }
 
     /** Settings: a new name is announced to everyone we know next time they speak. */
@@ -652,9 +725,9 @@ class MainViewModel(app: Application) : AndroidViewModel(app), SoundLink.Callbac
 
     // ---- helpers ------------------------------------------------------------------------
 
-    private fun addLog(kind: LogEntry.Kind, text: String, protocolId: Int, bytes: Int, image: Bitmap? = null, progress: String? = null, fraction: Float? = null, senderId: Int? = null, via: Int? = null): Long {
+    private fun addLog(kind: LogEntry.Kind, text: String, protocolId: Int, bytes: Int, image: Bitmap? = null, progress: String? = null, fraction: Float? = null, senderId: Int? = null, via: Int? = null, peer: Int? = null): Long {
         val id = nextLogId++
-        log.add(0, LogEntry(id, clock.format(Date()), kind, text, Modem.protocolName(protocolId), bytes, image, progress, fraction, senderId, via))
+        log.add(0, LogEntry(id, clock.format(Date()), kind, text, Modem.protocolName(protocolId), bytes, image, progress, fraction, senderId, via, peer))
         while (log.size > MAX_LOG) log.removeAt(log.size - 1)
         return id
     }

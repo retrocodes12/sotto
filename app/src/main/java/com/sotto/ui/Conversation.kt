@@ -1,5 +1,6 @@
 package com.sotto.ui
 
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
@@ -22,6 +23,9 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.material.icons.outlined.Lock
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
@@ -75,11 +79,17 @@ fun ConversationScreen(vm: MainViewModel) {
         onDispose { view.keepScreenOn = false }
     }
 
+    val chat = vm.openChat
+    BackHandler(enabled = chat != null) { vm.openChat(null) }
+    val shown = vm.log.filter { it.peer == chat }
+
     Scaffold(containerColor = MaterialTheme.colorScheme.background) { padding ->
         Column(Modifier.fillMaxSize().padding(padding).imePadding()) {
             Header(vm, onSettings = { showSettings = true })
-            if (vm.log.isEmpty()) {
-                EmptyState(Modifier.weight(1f), vm.nearby.mapNotNull { vm.identity.nameFor(it) })
+            if (vm.chatPeers.isNotEmpty()) ChatChips(vm)
+            if (shown.isEmpty()) {
+                if (chat == null) EmptyState(Modifier.weight(1f), vm.nearby.mapNotNull { vm.identity.nameFor(it) })
+                else PrivateEmpty(Modifier.weight(1f), vm.identity.nameFor(chat) ?: "", vm.hasKeyFor(chat))
             } else {
                 LazyColumn(
                     Modifier.weight(1f).fillMaxWidth(),
@@ -87,7 +97,7 @@ fun ConversationScreen(vm: MainViewModel) {
                     contentPadding = PaddingValues(horizontal = 16.dp, vertical = 12.dp),
                     verticalArrangement = Arrangement.spacedBy(10.dp),
                 ) {
-                    items(vm.log, key = { it.id }) { MessageTile(it, vm.identity.nameFor(it.senderId), it.via?.let { v -> vm.identity.nameFor(v) }) }
+                    items(shown, key = { it.id }) { MessageTile(it, if (chat == null) vm.identity.nameFor(it.senderId) else null, it.via?.let { v -> vm.identity.nameFor(v) }) }
                 }
             }
             vm.status?.let { Note(it, error = true) }
@@ -103,8 +113,21 @@ fun ConversationScreen(vm: MainViewModel) {
 private fun Header(vm: MainViewModel, onSettings: () -> Unit) {
     Row(Modifier.fillMaxWidth().padding(start = 20.dp, end = 8.dp, top = 8.dp, bottom = 4.dp), verticalAlignment = Alignment.Top) {
         Column(Modifier.weight(1f)) {
-            Text("sotto", style = MaterialTheme.typography.displayLarge, color = MaterialTheme.colorScheme.onBackground)
-            StatusLine(vm)
+            val chat = vm.openChat
+            if (chat == null) {
+                Text("sotto", style = MaterialTheme.typography.displayLarge, color = MaterialTheme.colorScheme.onBackground)
+                StatusLine(vm)
+            } else {
+                Text(vm.identity.nameFor(chat) ?: "", style = MaterialTheme.typography.displayMedium, color = MaterialTheme.colorScheme.onBackground)
+                Row(Modifier.padding(top = 2.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Icon(Icons.Outlined.Lock, contentDescription = null, tint = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.size(13.dp))
+                    Spacer(Modifier.width(6.dp))
+                    Text(
+                        if (vm.hasKeyFor(chat)) "private · only ${vm.identity.nameFor(chat)} can read this · ${com.sotto.IdentityStore.tagOf(chat)}" else "getting ${vm.identity.nameFor(chat)}'s key by sound…",
+                        style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            }
         }
         IconButton(onClick = onSettings, modifier = Modifier.padding(top = 6.dp)) {
             Icon(Icons.Outlined.Tune, contentDescription = "Settings", tint = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -125,6 +148,51 @@ private fun StatusLine(vm: MainViewModel) {
         Box(Modifier.width(56.dp).height(2.dp).background(MaterialTheme.colorScheme.outline)) {
             Box(Modifier.fillMaxWidth(level).height(2.dp).background(MaterialTheme.colorScheme.onSurfaceVariant))
         }
+    }
+}
+
+@Composable
+private fun ChatChips(vm: MainViewModel) {
+    val near = vm.nearby.toSet()
+    Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(start = 16.dp, end = 16.dp, top = 4.dp, bottom = 6.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        Chip("Room", selected = vm.openChat == null, badge = 0, dot = false) { vm.openChat(null) }
+        for (id in vm.chatPeers) {
+            Chip(vm.identity.nameFor(id) ?: "", selected = vm.openChat == id, badge = vm.unread[id] ?: 0, dot = id in near) { vm.openChat(id) }
+        }
+    }
+}
+
+@Composable
+private fun Chip(label: String, selected: Boolean, badge: Int, dot: Boolean, onClick: () -> Unit) {
+    val bg = if (selected) MaterialTheme.colorScheme.onBackground else MaterialTheme.colorScheme.surfaceVariant
+    val fg = if (selected) MaterialTheme.colorScheme.background else MaterialTheme.colorScheme.onSurface
+    Row(
+        Modifier.clip(RoundedCornerShape(999.dp)).background(bg).clickable(onClick = onClick).padding(horizontal = 14.dp, vertical = 8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        if (dot) { Box(Modifier.size(6.dp).clip(CircleShape).background(if (selected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.primary)); Spacer(Modifier.width(6.dp)) }
+        Text(label, style = MaterialTheme.typography.labelLarge, color = fg)
+        if (badge > 0) {
+            Spacer(Modifier.width(6.dp))
+            Box(Modifier.clip(CircleShape).background(MaterialTheme.colorScheme.primary).padding(horizontal = 6.dp, vertical = 1.dp)) {
+                Text("$badge", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onPrimary)
+            }
+        }
+    }
+}
+
+@Composable
+private fun PrivateEmpty(modifier: Modifier, name: String, hasKey: Boolean) {
+    Column(modifier.fillMaxWidth().padding(horizontal = 40.dp), verticalArrangement = Arrangement.Center, horizontalAlignment = Alignment.CenterHorizontally) {
+        Icon(Icons.Outlined.Lock, contentDescription = null, tint = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.size(28.dp))
+        Spacer(Modifier.height(12.dp))
+        Text(if (hasKey) "Private with $name." else "Swapping keys with $name.", style = MaterialTheme.typography.titleLarge, color = MaterialTheme.colorScheme.onBackground, textAlign = TextAlign.Center)
+        Spacer(Modifier.height(8.dp))
+        Text(
+            if (hasKey) "Messages here are encrypted to $name's phone. Other phones, even ones repeating them, cannot read them."
+            else "The two phones exchange keys by sound once, about six seconds each way. Sending unlocks when $name's key has arrived.",
+            style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant, textAlign = TextAlign.Center,
+        )
     }
 }
 
@@ -181,6 +249,7 @@ private fun MessageTile(e: LogEntry, sender: String?, via: String?) {
         }
         val caption = buildString {
             append(e.time.substring(0, 5))
+            if (e.peer != null) append(" · private")
             via?.let { append(" · via "); append(it) }
             e.progress?.let { append(" · "); append(it) } ?: run {
                 if (e.bytes > 0) { append(" · "); append(if (e.bytes >= 1000) "%.1f KB".format(e.bytes / 1000f) else "${e.bytes} B") }
@@ -253,7 +322,7 @@ private fun ComposeBar(vm: MainViewModel) {
             TextField(
                 value = vm.draft, onValueChange = { vm.draft = it },
                 modifier = Modifier.weight(1f),
-                placeholder = { Text("Message", color = MaterialTheme.colorScheme.onSurfaceVariant) },
+                placeholder = { Text(vm.openChat?.let { "Private to ${vm.identity.nameFor(it)}" } ?: "Message", color = MaterialTheme.colorScheme.onSurfaceVariant) },
                 textStyle = MaterialTheme.typography.bodyLarge,
                 maxLines = 4,
                 shape = RoundedCornerShape(24.dp),

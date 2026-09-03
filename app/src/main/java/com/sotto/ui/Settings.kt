@@ -86,7 +86,7 @@ fun SettingsSheet(vm: MainViewModel, onDismiss: () -> Unit) {
                 }
             }
             Text(
-                "Others see your name over your messages. The tag never changes. Phones announce themselves when opened and chirp three bytes when they have been quiet for a minute; anyone heard in the last three minutes counts as nearby.",
+                "Others see your name over your messages. The tag never changes. Phones announce themselves when opened and chirp three bytes when they have been quiet for a minute; anyone heard in the last three minutes counts as nearby. Tap a name above the messages for a private chat: the phones swap keys by sound once, and nobody else can read what follows.",
                 style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(top = 6.dp),
             )
             Row(Modifier.padding(top = 6.dp), verticalAlignment = Alignment.CenterVertically) {
