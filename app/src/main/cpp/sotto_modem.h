@@ -29,6 +29,8 @@ struct Params {
     int          bits;      // bits per symbol; alphabet is 1 << bits tones per set
     int          parityMax; // Reed-Solomon parity: half the frame (32 max) or, for bands with
                             // narrow fades, the whole frame (64 max)
+    int          channels;  // tones played at once, each in its own pair of sets; 1 for range,
+                            // more for throughput at short range (amplitude is shared)
 };
 
 int            protocolCount();
@@ -71,7 +73,8 @@ private:
     void reset();
 
     Params m_p;
-    int m_N, m_hop, m_M, m_bandBins;
+    int m_N, m_hop, m_M, m_K, m_bandBins;
+    float sumOverChannels(const float * r, int set, int v) const;
 
     // input ring + FFT work
     std::vector<float> m_ring; int m_ringPos = 0; int m_sinceHop = 0;

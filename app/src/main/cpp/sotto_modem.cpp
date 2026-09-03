@@ -30,14 +30,17 @@ constexpr float kTailAlpha     = SOTTO_TAIL_ALPHA;  // fraction of the previous 
 constexpr int   kSyncSeed[kSyncSymbols] = { 5, 42, 21, 58 };
 
 const Params kProtocols[] = {
-    // id   name               N     first step bits parity   band at 48 kHz
-    { 100, "Sotto Fast",       1024,  44,   1,   6,  32 },   // 2.06-8.02 kHz, 21 ms symbols
-    { 101, "Sotto Robust",     2048,  88,   2,   6,  32 },   // 2.06-8.04 kHz, 43 ms symbols
-    { 102, "Sotto Ultrasound", 2048, 768,   2,   4,  64 },   // 18.0-19.5 kHz, 43 ms symbols, 16 tones. The
-                                                             // first test phones were 16 dB louder at 18 kHz
-                                                             // than at 15 kHz and flat 18-19.5, so the whole
-                                                             // band sits on that peak; 2 cm wavelengths fade
-                                                             // single tones, hence rate 1/2 parity
+    // id   name               N     first step bits parity ch   band at 48 kHz
+    { 100, "Sotto Fast",       1024,  44,   1,   6,  32,   1 },  // 2.06-8.02 kHz, 21 ms symbols
+    { 101, "Sotto Robust",     2048,  88,   2,   6,  32,   1 },  // 2.06-8.04 kHz, 43 ms symbols
+    { 102, "Sotto Ultrasound", 2048, 768,   2,   4,  64,   1 },  // 18.0-19.5 kHz, 43 ms symbols, 16 tones. The
+                                                                 // first test phones were 16 dB louder at 18 kHz
+                                                                 // than at 15 kHz and flat 18-19.5, so the whole
+                                                                 // band sits on that peak; 2 cm wavelengths fade
+                                                                 // single tones, hence rate 1/2 parity
+    { 103, "Sotto Near",        512,  16,   1,   4,  32,   4 },  // 1.5-13.5 kHz, 10.7 ms symbols, four tones at
+                                                                 // once: 16 bits per symbol for photos at arm's
+                                                                 // length, where SNR is plentiful
 };
 
 uint16_t crc16(const uint8_t * d, int n) {           // CRC-16/CCITT-FALSE
@@ -85,8 +88,14 @@ void unpackBits(const int * syms, int nSyms, int bits, int nBits, uint8_t * out)
     }
 }
 
-int toneBin(const Params & p, int g, int v) {
-    return p.firstBin + (((g & 1) << p.bits) + v) * p.binStep;
+// Channel c has its own pair of tone sets; odd and even symbols alternate between them.
+int toneBin(const Params & p, int g, int c, int v) {
+    return p.firstBin + (((c * 2 + (g & 1)) << p.bits) + v) * p.binStep;
+}
+
+int dataSymbols(const Params & p, int codeBytes) {
+    const int chanSyms = (codeBytes * 8 + p.bits - 1) / p.bits;
+    return (chanSyms + p.channels - 1) / p.channels;   // time symbols, last one zero padded
 }
 
 } // namespace
@@ -101,7 +110,7 @@ const Params * protocolById(int id) {
 int symbolCount(const Params & p, int n) {
     const int frame = n + 3;
     const int code = frame + parityBytes(p, frame);
-    return kSyncSymbols + kHeaderSymbols + (code * 8 + p.bits - 1) / p.bits;
+    return kSyncSymbols + kHeaderSymbols + dataSymbols(p, code);
 }
 
 float airtimeSeconds(const Params & p, int n) {
@@ -124,25 +133,34 @@ std::vector<int16_t> encode(const Params & p, const uint8_t * payload, int n, fl
     RS::ReedSolomon rs(static_cast<uint8_t>(frame.size()), static_cast<uint8_t>(par));
     rs.Encode(frame.data(), code.data());
 
-    // symbols: sync, header twice, data
-    std::vector<int> syms;
-    for (int k = 0; k < kSyncSymbols; ++k) syms.push_back(syncTone(k, M));
-    for (int k = 0; k < kHeaderSymbols; ++k) syms.push_back(headerTone(n, k, M));
-    packBits(code.data(), static_cast<int>(code.size()) * 8, p.bits, syms);
+    // data as channel symbols, zero padded to whole time symbols
+    const int K = p.channels;
+    std::vector<int> data;
+    packBits(code.data(), static_cast<int>(code.size()) * 8, p.bits, data);
+    const int nData = dataSymbols(p, static_cast<int>(code.size()));
+    data.resize(static_cast<size_t>(nData) * K, 0);
 
-    // waveform: one tone per symbol with raised-cosine edges
+    // waveform: K tones per symbol (sync and header on every channel), raised-cosine edges
     const int N = p.symbolLen;
-    std::vector<int16_t> out;
-    out.reserve(syms.size() * N);
-    const float amp = std::min(1.0f, amplitude) * 32767.0f;
-    for (size_t g = 0; g < syms.size(); ++g) {
-        const float f = toneBin(p, static_cast<int>(g), syms[g]) * static_cast<float>(kSampleRate) / N;
-        const float w = 2.0f * static_cast<float>(M_PI) * f / kSampleRate;
-        for (int t = 0; t < N; ++t) {
-            float env = 1.0f;
-            if (t < kRampSamples) env = 0.5f * (1 - std::cos(static_cast<float>(M_PI) * t / kRampSamples));
-            else if (t >= N - kRampSamples) env = 0.5f * (1 - std::cos(static_cast<float>(M_PI) * (N - 1 - t) / kRampSamples));
-            out.push_back(static_cast<int16_t>(std::lround(amp * env * std::sin(w * t))));
+    const int total = kSyncSymbols + kHeaderSymbols + nData;
+    std::vector<int16_t> out(static_cast<size_t>(total) * N);
+    const float amp = std::min(1.0f, amplitude) * 32767.0f / K;
+    for (int g = 0; g < total; ++g) {
+        for (int c = 0; c < K; ++c) {
+            int v;
+            if (g < kSyncSymbols) v = syncTone(g, M);
+            else if (g < kSyncSymbols + kHeaderSymbols) v = headerTone(n, g - kSyncSymbols, M);
+            else v = data[static_cast<size_t>(g - kSyncSymbols - kHeaderSymbols) * K + c];
+            const float f = toneBin(p, g, c, v) * static_cast<float>(kSampleRate) / N;
+            const float w = 2.0f * static_cast<float>(M_PI) * f / kSampleRate;
+            const float phase = c * 1.9f;   // spread the channels' phases so peaks rarely coincide
+            int16_t * o = out.data() + static_cast<size_t>(g) * N;
+            for (int t = 0; t < N; ++t) {
+                float env = 1.0f;
+                if (t < kRampSamples) env = 0.5f * (1 - std::cos(static_cast<float>(M_PI) * t / kRampSamples));
+                else if (t >= N - kRampSamples) env = 0.5f * (1 - std::cos(static_cast<float>(M_PI) * (N - 1 - t) / kRampSamples));
+                o[t] = static_cast<int16_t>(o[t] + std::lround(amp * env * std::sin(w * t + phase)));
+            }
         }
     }
     return out;
@@ -151,7 +169,8 @@ std::vector<int16_t> encode(const Params & p, const uint8_t * payload, int n, fl
 // ---- decoder --------------------------------------------------------------------------
 
 Decoder::Decoder(const Params & p)
-    : m_p(p), m_N(p.symbolLen), m_hop(p.symbolLen / 4), m_M(1 << p.bits), m_bandBins(2 * (1 << p.bits)) {
+    : m_p(p), m_N(p.symbolLen), m_hop(p.symbolLen / 4), m_M(1 << p.bits), m_K(p.channels),
+      m_bandBins(p.channels * 2 * (1 << p.bits)) {
     m_ring.assign(m_N, 0.0f);
     // N real samples are transformed as an N/2-point complex FFT and split afterwards
     const int H = m_N / 2;
@@ -256,6 +275,13 @@ const float * Decoder::row(int64_t hop) const {
     return &m_hist[static_cast<size_t>(hop % kHistory) * m_bandBins];
 }
 
+// Energy of tone v in set `set` summed over all channels (sync and header use every channel).
+float Decoder::sumOverChannels(const float * r, int set, int v) const {
+    float e = 0;
+    for (int c = 0; c < m_K; ++c) e += r[((c * 2 + set) << m_p.bits) + v];
+    return e;
+}
+
 void Decoder::feed(const int16_t * samples, int n, const OnMessage & onMessage) {
     for (int i = 0; i < n; ++i) {
         m_ring[m_ringPos] = samples[i] / 32768.0f;
@@ -275,14 +301,14 @@ bool Decoder::syncScore(int64_t hop, float & score) const {
     for (int k = 0; k < kSyncSymbols; ++k) {
         const int64_t h = hop - 4 * (kSyncSymbols - 1 - k);
         if (h < 0) return false;
-        const int base = (k & 1) ? m_M : 0;
-        const float * e = row(h) + base;
+        const float * r = row(h);
         const int want = syncTone(k, m_M);
+        const float ew = sumOverChannels(r, k & 1, want);
         int above = 0;                       // tones louder than the expected one
-        for (int v = 0; v < m_M; ++v) if (e[v] > e[want]) ++above;
+        for (int v = 0; v < m_M; ++v) if (sumOverChannels(r, k & 1, v) > ew) ++above;
         if (above == 0) ++wins;
         else if (above > 2) return false;    // expected tone not even in the top three
-        const float snr = e[want] / m_floor[base + want];
+        const float snr = ew / sumOverChannels(m_floor.data(), k & 1, want);
         if (snr < kSyncSnr) return false;
         score += std::log(snr);
     }
@@ -361,11 +387,11 @@ void Decoder::onHop(const OnMessage & onMessage) {
         return;
     }
     if (m_hopIndex != m_nextHop) return;
-    {
+    for (int c = 0; c < m_K; ++c) {
         // Reverb cancellation: during the previous symbol's window this set's bins carried
         // nothing but the decaying tail of earlier symbols (the previous symbol used the
         // other set), so that energy is subtracted before picking the tone.
-        const int base = (m_g & 1) ? m_M : 0;
+        const int base = (c * 2 + (m_g & 1)) << m_p.bits;
         const float * prev = row(m_hopIndex - 4) + base;
         const float * cur = e + base;
         float sb = -1, ss = -1; int best = 0, second = 0;
@@ -381,9 +407,9 @@ void Decoder::onHop(const OnMessage & onMessage) {
         ++m_toneCount;
         m_binSum[base + best] += cur[best];
         ++m_binCount[base + best];
-        ++m_g;
-        m_nextHop += 4;
     }
+    ++m_g;
+    m_nextHop += 4;
 
     if (static_cast<int>(m_syms.size()) == m_frameSymbols) {
         finishFrame(onMessage);
@@ -402,7 +428,7 @@ bool Decoder::decideHeader() {
             double sum = 0;
             for (int k = 0; k < kHeaderSymbols; ++k) {
                 const int g = kSyncSymbols + k;
-                sum += row(m_t0 + off + 4 * (k + 1))[((g & 1) ? m_M : 0) + headerTone(len, k, m_M)];
+                sum += sumOverChannels(row(m_t0 + off + 4 * (k + 1)), g & 1, headerTone(len, k, m_M));
             }
             if (sum > bestSum) { bestSum = sum; bestLen = len; bestOff = off; }
         }
@@ -410,13 +436,13 @@ bool Decoder::decideHeader() {
     double floorMean = 0;
     for (int i = 0; i < m_bandBins; ++i) floorMean += m_floor[i];
     floorMean /= m_bandBins;
-    if (bestSum < kHeaderSnr * kHeaderSymbols * floorMean) return false;
+    if (bestSum < kHeaderSnr * kHeaderSymbols * m_K * floorMean) return false;
 
     m_t0 += bestOff;
     m_payloadLen = bestLen;
     const int frame = bestLen + 3;
     const int code = frame + parityBytes(m_p, frame);
-    m_frameSymbols = (code * 8 + m_p.bits - 1) / m_p.bits;
+    m_frameSymbols = dataSymbols(m_p, code) * m_K;   // channel symbols, including padding
     m_g = kSyncSymbols + kHeaderSymbols;
     m_nextHop = m_t0 + 4 * (m_g - (kSyncSymbols - 1));
     return true;

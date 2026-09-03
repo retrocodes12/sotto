@@ -9,8 +9,10 @@ import android.provider.Settings
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
+import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Arrangement
@@ -24,6 +26,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -52,6 +55,8 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.text.font.FontFamily
@@ -333,6 +338,15 @@ private fun LogRow(e: LogEntry) {
             Text(label, style = MaterialTheme.typography.bodySmall, color = tint, fontWeight = FontWeight.SemiBold)
         }
         Text(e.text, style = if (e.kind == LogEntry.Kind.INFO) MaterialTheme.typography.bodySmall else MaterialTheme.typography.bodyLarge)
+        e.image?.let { bmp ->
+            Image(
+                bitmap = bmp.asImageBitmap(),
+                contentDescription = e.text,
+                modifier = Modifier.padding(top = 6.dp).size(width = 240.dp, height = (240f * bmp.height / bmp.width.coerceAtLeast(1)).dp),
+                contentScale = ContentScale.Fit,
+            )
+        }
+        e.progress?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant) }
     }
 }
 
@@ -385,6 +399,16 @@ private fun ComposeRow(vm: MainViewModel) {
             ) {
                 Text(if (vm.transmitting) "Sending…" else "Send")
             }
+        }
+        val pickPhoto = rememberLauncherForActivityResult(ActivityResultContracts.PickVisualMedia()) { uri ->
+            if (uri != null) vm.sendPhoto(uri)
+        }
+        OutlinedButton(
+            onClick = { pickPhoto.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)) },
+            enabled = !vm.busy,
+            modifier = Modifier.fillMaxWidth().height(48.dp),
+        ) {
+            Text(if (vm.transferring) "Sending photo…" else "Send a photo (160 px, ${Modem.protocolName(vm.protocolId)})")
         }
     }
 }

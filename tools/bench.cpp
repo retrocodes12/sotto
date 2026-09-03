@@ -127,7 +127,7 @@ int main(int argc, char ** argv) {
         GGWave::Protocols::rx().toggle(id, true);
 
     std::vector<Modem> modems;
-    for (int i = 0; i < 2; ++i) {   // Sotto Fast, Sotto Robust
+    for (int i : { 0, 1, 3 }) {   // Sotto Fast, Sotto Robust, Sotto Near
         const sotto::Params & p = sotto::protocol(i);
         Modem m;
         m.name = p.name;
