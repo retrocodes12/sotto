@@ -26,7 +26,6 @@ import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.LifecycleResumeEffect
 import androidx.lifecycle.compose.LifecycleStartEffect
 import androidx.lifecycle.viewmodel.compose.viewModel
-import androidx.lifecycle.ViewModelStoreOwner
 import android.os.Build
 import androidx.compose.runtime.LaunchedEffect
 import com.sotto.ui.ConversationScreen
@@ -46,7 +45,8 @@ class MainActivity : ComponentActivity() {
 fun SottoApp() {
     val context = LocalContext.current
     // The engine lives for the process (see SottoApplication), not for this activity.
-    val vm: MainViewModel = viewModel(viewModelStoreOwner = context.applicationContext as ViewModelStoreOwner)
+    val app = context.applicationContext as SottoApplication
+    val vm: MainViewModel = viewModel(viewModelStoreOwner = app, factory = app.defaultViewModelProviderFactory, extras = app.defaultViewModelCreationExtras)
     fun hasMic() = ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
 
     var granted by remember { mutableStateOf(hasMic()) }
