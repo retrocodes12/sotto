@@ -193,6 +193,20 @@ fun SettingsSheet(vm: MainViewModel, onDismiss: () -> Unit) {
             }
             Rule()
 
+            Caps("History")
+            var confirmClear by remember { mutableStateOf(false) }
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    "${vm.log.count { it.kind != com.sotto.LogEntry.Kind.INFO }} messages kept on this phone. Nothing is stored anywhere else.",
+                    style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.weight(1f),
+                )
+                Spacer(Modifier.width(12.dp))
+                OutlinedButton(onClick = { if (confirmClear) { vm.clearHistory(); confirmClear = false } else confirmClear = true }) {
+                    Text(if (confirmClear) "Really clear" else "Clear", color = if (confirmClear) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onBackground)
+                }
+            }
+            Rule()
+
             Caps("Version")
             val u = vm.update
             Row(verticalAlignment = Alignment.CenterVertically) {
@@ -286,5 +300,47 @@ private fun ago(t: Long): String {
         s < 3600 -> "${s / 60} min ago"
         s < 86400 -> "${s / 3600} h ago"
         else -> "${s / 86400} d ago"
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun ReachSheet(vm: MainViewModel, r: MainViewModel.Reach) {
+    ModalBottomSheet(onDismissRequest = { if (!r.running) vm.dismissReach() }, containerColor = MaterialTheme.colorScheme.background) {
+        Column(Modifier.padding(horizontal = 24.dp).padding(bottom = 32.dp)) {
+            Text("Reach", style = MaterialTheme.typography.displayMedium)
+            Spacer(Modifier.height(6.dp))
+            Text(
+                if (r.running) "Probe ${r.probesSent} of ${MainViewModel.REACH_PROBES}. Every phone that hears one answers with how loudly it arrived."
+                else if (r.heard.isEmpty()) "Nobody answered. Either no one is listening, or you are out of reach for ${if (vm.silentText) "silent" else "audible"} messages."
+                else "Done. Each bar is one phone, from how loudly the probes arrived in both directions.",
+                style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Spacer(Modifier.height(16.dp))
+            for ((id, snrs) in r.heard.entries.sortedByDescending { it.value.sorted()[it.value.size / 2] }) {
+                val (bar, verdict) = vm.reachVerdict(snrs)
+                Text(vm.identity.nameFor(id) ?: "", style = MaterialTheme.typography.titleMedium)
+                Spacer(Modifier.height(6.dp))
+                Box(Modifier.fillMaxWidth().height(6.dp).background(MaterialTheme.colorScheme.surfaceVariant)) {
+                    Box(Modifier.fillMaxWidth(bar).height(6.dp).background(MaterialTheme.colorScheme.primary))
+                }
+                Spacer(Modifier.height(6.dp))
+                Text("${snrs.size / 2} of ${r.probesSent} probes answered, $verdict", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Spacer(Modifier.height(16.dp))
+            }
+            if (!r.running) {
+                val weak = r.heard.values.any { vm.reachVerdict(it).first < 0.45f } || r.heard.isEmpty()
+                Row {
+                    if (weak && vm.silentText && vm.autoProtocol) {
+                        Button(
+                            onClick = { vm.silentText = false; vm.dismissReach() },
+                            colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary, contentColor = MaterialTheme.colorScheme.onPrimary),
+                        ) { Text("Switch to audible") }
+                        Spacer(Modifier.width(12.dp))
+                    }
+                    OutlinedButton(onClick = { vm.dismissReach() }) { Text("Close", color = MaterialTheme.colorScheme.onBackground) }
+                }
+            }
+        }
     }
 }

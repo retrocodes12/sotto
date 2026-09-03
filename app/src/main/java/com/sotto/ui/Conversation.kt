@@ -26,6 +26,22 @@ import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.material.icons.outlined.Lock
+import androidx.compose.material.icons.outlined.Radar
+import androidx.compose.material.icons.outlined.Add
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.TextButton
+import androidx.compose.material3.OutlinedTextField
+import android.content.ClipData
+import android.content.ClipboardManager
+import android.content.Context
+import android.content.Intent
+import android.net.Uri
+import android.provider.ContactsContract
+import android.provider.Settings
+import androidx.compose.ui.platform.LocalContext
+import com.sotto.Wire
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
@@ -100,6 +116,7 @@ fun ConversationScreen(vm: MainViewModel) {
         }
     }
     if (showSettings) SettingsSheet(vm, onDismiss = { showSettings = false })
+    vm.reach?.let { ReachSheet(vm, it) }
 }
 
 @Composable
@@ -121,6 +138,9 @@ private fun Header(vm: MainViewModel, onSettings: () -> Unit) {
                     )
                 }
             }
+        }
+        IconButton(onClick = { vm.startReach() }, enabled = !vm.busy, modifier = Modifier.padding(top = 6.dp)) {
+            Icon(Icons.Outlined.Radar, contentDescription = "How's my reach?", tint = MaterialTheme.colorScheme.onSurfaceVariant)
         }
         IconButton(onClick = onSettings, modifier = Modifier.padding(top = 6.dp)) {
             Icon(Icons.Outlined.Tune, contentDescription = "Settings", tint = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -227,7 +247,9 @@ private fun MessageTile(e: LogEntry, sender: String?, via: String?) {
                         modifier = Modifier.width(240.dp).aspectRatio(bmp.width.toFloat() / bmp.height.coerceAtLeast(1)).clip(RoundedCornerShape(14.dp)),
                     )
                 }
-                if (e.text.isNotEmpty()) {
+                if (e.card != null) {
+                    CardBody(e.card, ink)
+                } else if (e.text.isNotEmpty()) {
                     Text(e.text, style = MaterialTheme.typography.bodyLarge, color = ink,
                         modifier = Modifier.padding(if (e.image != null) 8.dp else 0.dp))
                 }
@@ -305,14 +327,21 @@ private fun ComposeBar(vm: MainViewModel) {
                 modifier = Modifier.align(Alignment.End).padding(end = 64.dp, bottom = 4.dp),
             )
         }
+        var menu by remember { mutableStateOf(false) }
+        var dialog by remember { mutableStateOf(0) }
         Row(verticalAlignment = Alignment.CenterVertically) {
-            IconButton(
-                onClick = { pickPhoto.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)) },
-                enabled = !vm.busy,
-                modifier = Modifier.size(48.dp),
-            ) {
-                Icon(Icons.Outlined.Image, contentDescription = "Send a photo", tint = MaterialTheme.colorScheme.onSurfaceVariant)
+            Box {
+                IconButton(onClick = { menu = true }, enabled = !vm.busy, modifier = Modifier.size(48.dp)) {
+                    Icon(Icons.Outlined.Add, contentDescription = "Share", tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+                DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
+                    DropdownMenuItem(text = { Text("Photo") }, leadingIcon = { Icon(Icons.Outlined.Image, null) }, onClick = { menu = false; pickPhoto.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)) })
+                    DropdownMenuItem(text = { Text("Link") }, onClick = { menu = false; dialog = Wire.CARD_LINK })
+                    DropdownMenuItem(text = { Text("Wi-Fi network") }, onClick = { menu = false; dialog = Wire.CARD_WIFI })
+                    DropdownMenuItem(text = { Text("Contact") }, onClick = { menu = false; dialog = Wire.CARD_CONTACT })
+                }
             }
+            if (dialog != 0) CardDialog(kind = dialog, onDismiss = { dialog = 0 }, onSend = { f -> vm.sendCard(dialog, f); dialog = 0 })
             TextField(
                 value = vm.draft, onValueChange = { vm.draft = it },
                 modifier = Modifier.weight(1f),
@@ -343,4 +372,74 @@ private fun ComposeBar(vm: MainViewModel) {
             }
         }
     }
+}
+
+@Composable
+private fun CardDialog(kind: Int, onDismiss: () -> Unit, onSend: (List<String>) -> Unit) {
+    val labels = when (kind) {
+        Wire.CARD_LINK -> listOf("Link")
+        Wire.CARD_WIFI -> listOf("Network name", "Password")
+        else -> listOf("Name", "Phone", "Email")
+    }
+    val values = remember { labels.map { mutableStateOf("") } }
+    val ok = values[0].value.isNotBlank()
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        containerColor = MaterialTheme.colorScheme.background,
+        title = { Text(when (kind) { Wire.CARD_LINK -> "Share a link"; Wire.CARD_WIFI -> "Share Wi-Fi"; else -> "Share a contact" }, style = MaterialTheme.typography.titleLarge) },
+        text = {
+            Column {
+                labels.forEachIndexed { i, l ->
+                    OutlinedTextField(value = values[i].value, onValueChange = { values[i].value = it }, label = { Text(l) }, singleLine = true, modifier = Modifier.fillMaxWidth().padding(bottom = 8.dp))
+                }
+                Text("Goes out on Near, at arm's length, in about a second. Anyone within reach can hear it.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+        },
+        confirmButton = { TextButton(onClick = { onSend(values.map { it.value }) }, enabled = ok) { Text("Send", color = MaterialTheme.colorScheme.onBackground) } },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel", color = MaterialTheme.colorScheme.onSurfaceVariant) } },
+    )
+}
+
+@Composable
+private fun CardBody(card: LogEntry.Card, ink: Color) {
+    val context = LocalContext.current
+    val f = card.fields
+    when (card.kind) {
+        Wire.CARD_LINK -> {
+            val url = f.getOrElse(0) { "" }
+            Text(url, style = MaterialTheme.typography.bodyLarge, color = ink)
+            ActionLine("Open", ink) { runCatching { context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(if (url.contains("://")) url else "https://$url"))) } }
+        }
+        Wire.CARD_WIFI -> {
+            Text("Wi-Fi  ${f.getOrElse(0) { "" }}", style = MaterialTheme.typography.bodyLarge, color = ink)
+            if (f.getOrElse(1) { "" }.isNotEmpty()) Text("password  ${f[1]}", style = MaterialTheme.typography.bodyMedium, color = ink.copy(alpha = 0.8f))
+            Row {
+                if (f.getOrElse(1) { "" }.isNotEmpty()) ActionLine("Copy password", ink) {
+                    (context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager).setPrimaryClip(ClipData.newPlainText("Wi-Fi password", f[1]))
+                }
+                Spacer(Modifier.width(16.dp))
+                ActionLine("Wi-Fi settings", ink) { runCatching { context.startActivity(Intent(Settings.ACTION_WIFI_SETTINGS)) } }
+            }
+        }
+        else -> {
+            Text(f.getOrElse(0) { "" }, style = MaterialTheme.typography.bodyLarge, color = ink)
+            f.getOrNull(1)?.takeIf { it.isNotEmpty() }?.let { Text(it, style = MaterialTheme.typography.bodyMedium, color = ink.copy(alpha = 0.8f)) }
+            f.getOrNull(2)?.takeIf { it.isNotEmpty() }?.let { Text(it, style = MaterialTheme.typography.bodyMedium, color = ink.copy(alpha = 0.8f)) }
+            ActionLine("Save contact", ink) {
+                runCatching {
+                    context.startActivity(Intent(ContactsContract.Intents.Insert.ACTION).apply {
+                        type = ContactsContract.RawContacts.CONTENT_TYPE
+                        putExtra(ContactsContract.Intents.Insert.NAME, f.getOrElse(0) { "" })
+                        f.getOrNull(1)?.let { putExtra(ContactsContract.Intents.Insert.PHONE, it) }
+                        f.getOrNull(2)?.let { putExtra(ContactsContract.Intents.Insert.EMAIL, it) }
+                    })
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun ActionLine(label: String, ink: Color, onClick: () -> Unit) {
+    Text(label, style = MaterialTheme.typography.labelLarge, color = ink, modifier = Modifier.padding(top = 8.dp).clickable(onClick = onClick))
 }

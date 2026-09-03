@@ -63,6 +63,9 @@ public:
     // True while a frame is being received (sync found, header or data in progress).
     bool receiving() const { return m_state != State::Idle; }
 
+    // Mean tone level over noise floor, in dB, of the last frame this decoder delivered.
+    float lastSnrDb() const { return m_lastSnrDb; }
+
     // Optional: one line per notable event (sync found, header/parity/crc failure).
     std::function<void(const char *)> onDebug;
 
@@ -97,6 +100,7 @@ private:
     std::vector<int> m_syms, m_second; std::vector<float> m_conf;   // tone, runner-up, best/second energy ratio
     int m_payloadLen = -1; int m_frameSymbols = 0;
     double m_toneSum = 0; int m_toneCount = 0;   // chosen-bin energy over the frame, for level stats
+    mutable float m_lastSnrDb = 0;
     std::vector<double> m_binSum; std::vector<int> m_binCount;   // per-bin, to see the channel's shape
     void debugStats(const char * what, size_t erasures) const;
 };

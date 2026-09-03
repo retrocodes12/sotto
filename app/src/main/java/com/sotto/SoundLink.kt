@@ -34,7 +34,7 @@ class SoundLink(context: Context, private val callbacks: Callbacks) {
     interface Callbacks {
         /** Roughly 12 times a second while listening. [rms] is linear, 0..1. */
         fun onLevel(rms: Float)
-        fun onMessage(payload: ByteArray, protocolId: Int)
+        fun onMessage(payload: ByteArray, protocolId: Int, snrDb: Float)
         /** Capture is up; [sourceName] is the AudioRecord source that worked. */
         fun onCaptureStarted(sourceName: String)
         /** Capture ended. [reason] is null for a requested stop, otherwise a user-readable error. */
@@ -183,7 +183,7 @@ class SoundLink(context: Context, private val callbacks: Callbacks) {
                 if (!decodeMuted.get()) {
                     var payload = modem.decode(frame, n)
                     while (payload != null) {
-                        callbacks.onMessage(payload, modem.lastRxProtocolId)
+                        callbacks.onMessage(payload, modem.lastRxProtocolId, modem.lastRxSnr)
                         payload = modem.takePending()
                     }
                 }

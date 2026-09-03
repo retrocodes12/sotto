@@ -25,6 +25,7 @@ constexpr int kSottoIdBase = 100;
 struct Pending {
     std::vector<uint8_t> payload;
     int protocolId;
+    float snrDb;
 };
 
 struct Engine {
@@ -33,6 +34,7 @@ struct Engine {
     std::vector<std::unique_ptr<sotto::Decoder>> sottoRx;
     std::deque<Pending> pending;
     int lastRxProtocolId = -1;
+    float lastRxSnrDb = 0;
 };
 
 Engine * engineOf(jlong handle) {
@@ -44,6 +46,7 @@ jbyteArray takePending(JNIEnv * env, Engine * e) {
     Pending p = std::move(e->pending.front());
     e->pending.pop_front();
     e->lastRxProtocolId = p.protocolId;
+    e->lastRxSnrDb = p.snrDb;
     jbyteArray out = env->NewByteArray(static_cast<jsize>(p.payload.size()));
     if (out == nullptr) return nullptr;
     env->SetByteArrayRegion(out, 0, static_cast<jsize>(p.payload.size()), reinterpret_cast<const jbyte *>(p.payload.data()));
@@ -157,11 +160,11 @@ Java_com_sotto_Modem_nativeDecode(JNIEnv * env, jclass, jlong handle, jshortArra
     if (e->ggRx.decode(p, static_cast<uint32_t>(count) * sizeof(int16_t))) {
         GGWave::TxRxData view;
         const int n = e->ggRx.rxTakeData(view);
-        if (n > 0) e->pending.push_back({ std::vector<uint8_t>(view.data(), view.data() + n), static_cast<int>(e->ggRx.rxProtocolId()) });
+        if (n > 0) e->pending.push_back({ std::vector<uint8_t>(view.data(), view.data() + n), static_cast<int>(e->ggRx.rxProtocolId()), 0.0f });
     }
     for (auto & dec : e->sottoRx) {
         dec->feed(reinterpret_cast<const int16_t *>(p), count, [&](const uint8_t * d, int n) {
-            e->pending.push_back({ std::vector<uint8_t>(d, d + n), dec->params().id });
+            e->pending.push_back({ std::vector<uint8_t>(d, d + n), dec->params().id, dec->lastSnrDb() });
         });
     }
     env->ReleaseShortArrayElements(samples, p, JNI_ABORT);
@@ -181,6 +184,12 @@ Java_com_sotto_Modem_nativeReceiving(JNIEnv *, jclass, jlong handle) {
     if (e == nullptr) return JNI_FALSE;
     for (auto & dec : e->sottoRx) if (dec->receiving()) return JNI_TRUE;
     return JNI_FALSE;
+}
+
+JNIEXPORT jfloat JNICALL
+Java_com_sotto_Modem_nativeLastRxSnr(JNIEnv *, jclass, jlong handle) {
+    auto * e = engineOf(handle);
+    return e ? e->lastRxSnrDb : 0.0f;
 }
 
 JNIEXPORT jint JNICALL

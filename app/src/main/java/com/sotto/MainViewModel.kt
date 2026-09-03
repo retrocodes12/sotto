@@ -47,14 +47,20 @@ class LogEntry(
     /** Sequence number of a sent private message, until its receipt arrives. */
     val seq: Int? = null,
     val delivered: Boolean = false,
+    /** The photo's JPEG bytes, kept until History has written them to a file. */
+    val imageBytes: ByteArray? = null,
+    /** A shared link, Wi-Fi network or contact: kind and its fields. */
+    val card: Card? = null,
 ) {
     enum class Kind { RX, TX, INFO }
+
+    class Card(val kind: Int, val fields: List<String>)
 
     fun with(
         text: String = this.text, image: Bitmap? = this.image, progress: String? = this.progress,
         bytes: Int = this.bytes, fraction: Float? = this.fraction, senderId: Int? = this.senderId, via: Int? = this.via,
-        delivered: Boolean = this.delivered,
-    ) = LogEntry(id, time, kind, text, protocol, bytes, image, progress, fraction, senderId, via, peer, seq, delivered)
+        delivered: Boolean = this.delivered, imageBytes: ByteArray? = this.imageBytes,
+    ) = LogEntry(id, time, kind, text, protocol, bytes, image, progress, fraction, senderId, via, peer, seq, delivered, imageBytes, card)
 }
 
 /** Owns the [SoundLink] and exposes everything the UI shows as Compose state. */
@@ -76,6 +82,75 @@ class MainViewModel(app: Application) : AndroidViewModel(app), SoundLink.Callbac
         listenInBackground = on
         if (!on && !inForeground) { link.stopListening(); ListenService.stop(getApplication()) }
         if (on && wantListening) ListenService.start(getApplication())
+    }
+
+    /** A link, Wi-Fi network or contact, always on Near: one frame, arm's length, audible. */
+    fun sendCard(kind: Int, fields: List<String>) {
+        if (busy) return
+        val clean = fields.map { it.trim().replace('\u001F', ' ') }
+        val frame = Wire.card(identity.id, identity.nextSeq(), kind, clean)
+        if (frame.size > Transfer.MAX_FRAME) { status = "That is too long to fit in one card."; return }
+        val pid = Modem.NEAR_PROTOCOL_ID
+        val vol = effectiveVolumeFor(pid)
+        status = null
+        link.post {
+            val ok = link.transmit(frame, pid, vol)
+            main.post { if (ok) addLog(LogEntry.Kind.TX, cardTitle(kind, clean), pid, frame.size, card = LogEntry.Card(kind, clean)) }
+        }
+    }
+
+    private fun cardTitle(kind: Int, f: List<String>) = when (kind) {
+        Wire.CARD_LINK -> f.getOrElse(0) { "" }
+        Wire.CARD_WIFI -> "Wi-Fi: ${f.getOrElse(0) { "" }}"
+        else -> f.getOrElse(0) { "" }
+    }
+
+    /** Reach test: three probes, everyone answers with how loudly each arrived. */
+    class Reach(val started: Long) {
+        var probesSent by mutableIntStateOf(0)
+        var running by mutableStateOf(true)
+        /** peer -> SNRs in dB: theirs of our probe, and ours of their reply. */
+        val heard = mutableStateMapOf<Int, List<Int>>()
+    }
+    var reach by mutableStateOf<Reach?>(null)
+        private set
+    private var lastSnrDb = 0f
+    private var reachSeq = 0
+
+    fun startReach() {
+        if (busy || reach?.running == true) return
+        val r = Reach(SystemClock.elapsedRealtime())
+        reach = r
+        val pid = textProtocolId
+        val vol = effectiveVolumeFor(pid)
+        val base = (Random.nextInt(0, 80) * 3) and 0xFF
+        link.post {
+            for (k in 0 until REACH_PROBES) {
+                val seq = (base + k) and 0xFF
+                main.post { reachSeq = seq }
+                link.waitUntilQuiet(RELAY_QUIET_WAIT_MS)
+                link.transmit(Wire.probe(identity.id, seq), pid, vol)
+                main.post { r.probesSent = k + 1 }
+                SystemClock.sleep(REACH_GAP_MS)
+            }
+            main.post { r.running = false; Log.i(TAG, "reach finished: ${r.heard.map { "${IdentityStore.tagOf(it.key)}=${it.value}" }}") }
+        }
+    }
+
+    fun dismissReach() { reach = null }
+
+    /** Bar 0..1 and a verdict for a peer's SNR list. */
+    fun reachVerdict(snrs: List<Int>): Pair<Float, String> {
+        if (snrs.isEmpty()) return 0f to "no answer"
+        val snr = snrs.sorted()[snrs.size / 2]
+        val bar = ((snr - 8f) / 27f).coerceIn(0.05f, 1f)
+        val text = when {
+            snr >= 28 -> "strong, $snr dB. Silent messages will be fine."
+            snr >= 20 -> "good, $snr dB. Silent is fine; photos may need a step closer."
+            snr >= 14 -> "at the edge, $snr dB. Silent will drop some; audible would be safer."
+            else -> "weak, $snr dB. Move closer or switch to audible."
+        }
+        return bar to text
     }
 
     /** Private chats. [openChat] is the peer whose chat is on screen; null is the room. */
@@ -112,9 +187,28 @@ class MainViewModel(app: Application) : AndroidViewModel(app), SoundLink.Callbac
         }
     }
 
-    init {
-        main.postDelayed(presence, PRESENCE_TICK_MS)
+    private val io = java.util.concurrent.Executors.newSingleThreadExecutor { r -> Thread(r, "sotto-history") }
+    private var saveQueued = false
+    private val saveNow = Runnable {
+        saveQueued = false
+        val snapshot = log.toList()
+        io.execute { runCatching { History.save(getApplication(), snapshot) }.onFailure { Log.w(TAG, "history save failed", it) } }
     }
+
+    /** Coalesces bursts of changes into one write a second later. */
+    private fun scheduleSave() {
+        if (saveQueued) return
+        saveQueued = true
+        main.postDelayed(saveNow, 1000)
+    }
+
+    fun clearHistory() {
+        log.clear()
+        unread.clear()
+        io.execute { History.clear(getApplication()) }
+    }
+
+
     /** (sender, seq) pairs heard recently: shown once, repeated at most once. */
     private val seen = LinkedHashMap<Int, Long>()
     private val pendingRelays = HashMap<Int, AtomicBoolean>()
@@ -404,8 +498,9 @@ class MainViewModel(app: Application) : AndroidViewModel(app), SoundLink.Callbac
         main.post { micLevel = rms }
     }
 
-    override fun onMessage(payload: ByteArray, protocolId: Int) {
+    override fun onMessage(payload: ByteArray, protocolId: Int, snrDb: Float) {
         main.post {
+            lastSnrDb = snrDb
             if (Transfer.isTransferFrame(payload)) {
                 Transfer.parse(payload)?.let { onTransferFrame(it, protocolId) }
                 return@post
@@ -436,6 +531,32 @@ class MainViewModel(app: Application) : AndroidViewModel(app), SoundLink.Callbac
                 is Wire.Parsed.Here -> {
                     if (m.id != identity.id) noteSender(m.id, protocolId)
                 }
+                is Wire.Parsed.Card -> {
+                    if (m.from == identity.id) return@post
+                    val key = seenKey(m.from, m.seq, transfer = false)
+                    if (markSeen(key)) return@post
+                    noteSender(m.from, protocolId)
+                    addLog(LogEntry.Kind.RX, cardTitle(m.kind, m.fields), protocolId, payload.size, senderId = m.from, card = LogEntry.Card(m.kind, m.fields))
+                    notifyMessage(identity.nameFor(m.from) ?: "Sotto", "shared " + when (m.kind) { Wire.CARD_LINK -> "a link"; Wire.CARD_WIFI -> "a Wi-Fi network"; else -> "a contact" }, m.from)
+                }
+                is Wire.Parsed.Probe -> {
+                    if (m.from == identity.id) return@post
+                    noteSender(m.from, protocolId)
+                    val snr = lastSnrDb.toInt().coerceIn(0, 255)
+                    val frame = Wire.probeReply(identity.id, m.from, m.seq, snr)
+                    val vol = effectiveVolumeFor(protocolId)
+                    val wait = REPLY_DELAY_MS + Random.nextLong(0, 1500)
+                    link.post { SystemClock.sleep(wait); link.waitUntilQuiet(RELAY_QUIET_WAIT_MS); link.transmit(frame, protocolId, vol) }
+                }
+                is Wire.Parsed.ProbeReply -> {
+                    if (m.from == identity.id || m.to != identity.id) return@post
+                    noteSender(m.from, protocolId)
+                    reach?.let { r ->
+                        val ours = lastSnrDb.toInt().coerceIn(0, 255)
+                        r.heard[m.from] = (r.heard[m.from] ?: emptyList()) + listOf(m.snrDb, ours)
+                        Log.i(TAG, "reach reply from ${IdentityStore.tagOf(m.from)}: they heard ${m.snrDb} dB, we hear $ours dB")
+                    }
+                }
                 is Wire.Parsed.Ack -> {
                     if (m.from == identity.id) return@post
                     val key = seenKey(m.from, m.seq, transfer = false, ack = true)
@@ -446,7 +567,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app), SoundLink.Callbac
                     if (m.to == identity.id) {
                         Log.i(TAG, "receipt from ${IdentityStore.tagOf(m.from)} for seq ${m.seq}")
                         val i = log.indexOfFirst { it.kind == LogEntry.Kind.TX && it.peer == m.from && it.seq == m.seq }
-                        if (i >= 0) log[i] = log[i].with(delivered = true)
+                        if (i >= 0) updateLog(log[i].id) { it.with(delivered = true) }
                     } else if (relayForOthers && m.hops > 0) {
                         scheduleRelay(key, Wire.relayAck(m.raw), protocolId)
                     }
@@ -657,7 +778,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app), SoundLink.Callbac
         when (kind) {
             Transfer.KIND_JPEG -> {
                 val bmp = BitmapFactory.decodeByteArray(content, 0, content.size)
-                updateLog(x.logId) { it.with(text = if (bmp != null) "" else "photo could not be decoded", image = bmp, progress = null, fraction = null, bytes = content.size) }
+                updateLog(x.logId) { it.with(text = if (bmp != null) "" else "photo could not be decoded", image = bmp, progress = null, fraction = null, bytes = content.size, imageBytes = content) }
                 notifyMessage(identity.nameFor(assembled.sender) ?: "Sotto", "sent a photo", assembled.sender)
             }
             else -> updateLog(x.logId) { it.with(text = String(content, Charsets.UTF_8), progress = null, fraction = null, bytes = content.size) }
@@ -709,7 +830,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app), SoundLink.Callbac
         val perChunk = Modem.airtime(pid, Transfer.MAX_FRAME) ?: 3f
         val forwarded = origin != identity.id
         val logId = addLog(if (forwarded) LogEntry.Kind.INFO else LogEntry.Kind.TX, if (forwarded) "Forwarding ${identity.nameFor(origin)}'s photo for others" else "", pid, content.size, image = preview,
-            progress = "sending, about ${(chunks.size * (perChunk + 0.4f)).toInt()} s", fraction = 0f)
+            progress = "sending, about ${(chunks.size * (perChunk + 0.4f)).toInt()} s", fraction = 0f, imageBytes = if (forwarded) null else content)
         transferring = true
         status = null
         if (!wantListening) setListening(true)   // needed to hear the receiver's requests
@@ -787,16 +908,17 @@ class MainViewModel(app: Application) : AndroidViewModel(app), SoundLink.Callbac
 
     // ---- helpers ------------------------------------------------------------------------
 
-    private fun addLog(kind: LogEntry.Kind, text: String, protocolId: Int, bytes: Int, image: Bitmap? = null, progress: String? = null, fraction: Float? = null, senderId: Int? = null, via: Int? = null, peer: Int? = null, seq: Int? = null): Long {
+    private fun addLog(kind: LogEntry.Kind, text: String, protocolId: Int, bytes: Int, image: Bitmap? = null, progress: String? = null, fraction: Float? = null, senderId: Int? = null, via: Int? = null, peer: Int? = null, seq: Int? = null, imageBytes: ByteArray? = null, card: LogEntry.Card? = null): Long {
         val id = nextLogId++
-        log.add(0, LogEntry(id, clock.format(Date()), kind, text, Modem.protocolName(protocolId), bytes, image, progress, fraction, senderId, via, peer, seq))
+        log.add(0, LogEntry(id, clock.format(Date()), kind, text, Modem.protocolName(protocolId), bytes, image, progress, fraction, senderId, via, peer, seq, imageBytes = imageBytes, card = card))
         while (log.size > MAX_LOG) log.removeAt(log.size - 1)
+        scheduleSave()
         return id
     }
 
     private fun updateLog(id: Long, change: (LogEntry) -> LogEntry) {
         val i = log.indexOfFirst { it.id == id }
-        if (i >= 0) log[i] = change(log[i])
+        if (i >= 0) { log[i] = change(log[i]); scheduleSave() }
     }
 
     /**
@@ -817,6 +939,13 @@ class MainViewModel(app: Application) : AndroidViewModel(app), SoundLink.Callbac
         burstLastSeq = seq
         burstLastAt = now
         Log.i(TAG, "burst seq $seq: received $burstReceived / $burstExpected")
+    }
+
+    init {   // last: every property above is initialised by now
+        val restored = History.load(app)
+        log.addAll(restored)
+        nextLogId = (restored.maxOfOrNull { it.id } ?: 0L) + 1
+        main.postDelayed(presence, PRESENCE_TICK_MS)
     }
 
     companion object {
@@ -843,11 +972,13 @@ class MainViewModel(app: Application) : AndroidViewModel(app), SoundLink.Callbac
         private const val RELAY_MIN_WAIT_MS = 1_000L
         private const val RELAY_JITTER_MS = 2_000L
         private const val RELAY_QUIET_WAIT_MS = 6_000L
+        const val REACH_PROBES = 3
+        private const val REACH_GAP_MS = 6_500L
         private const val PRESENCE_TICK_MS = 5_000L
         private const val PRESENT_FOR_MS = 3 * 60 * 1000L
         private const val CHIRP_AFTER_IDLE_MS = 75_000L
         private const val CHIRP_JITTER_MS = 20_000L
-        private const val MAX_LOG = 200
+        private const val MAX_LOG = 500
         private val BURST_REGEX = Regex("^TB(\\d\\d)/(\\d\\d):")
 
         /** Fixed 20-byte payload: "TB01/10:" + 12 filler bytes. */

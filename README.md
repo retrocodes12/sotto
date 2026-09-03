@@ -145,6 +145,14 @@ payloads.
   (`UNPROCESSED`, `VOICE_RECOGNITION` or `MIC`).
 - **Message** box with a byte counter and, for Sotto protocols, the seconds of audio the
   draft will take. Send greys out above 100 bytes.
+- **Reach.** The radar button plays three short probes; every phone that hears one answers
+  with how loudly it arrived. A sheet shows a bar and a plain verdict per person, and offers
+  to switch to the audible band when silent would drop messages.
+- **Share cards.** The + menu sends a link, a Wi-Fi network or a contact as one frame on Near,
+  at arm's length, in about a second. The receiving tile opens the link, copies the password
+  or saves the contact.
+- **History.** Messages and photos stay on the phone across restarts, up to 500. Settings has
+  a clear that really forgets.
 - **Listens with the screen off.** A foreground service holds the microphone behind a quiet
   "Sotto is listening" notification with a Stop action, so a phone on the table keeps
   receiving. Messages that arrive while the app is not on screen show as notifications.

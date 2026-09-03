@@ -131,6 +131,9 @@ class IdentityStore(context: Context) {
  *   KEY    AB | fromHi fromLo | toHi toLo | x25519 public key (32)
  *   PRIV   AC | fromHi fromLo | toHi toLo | seq | hopsLeft | counter (4) | AES-GCM sealed text
  *   ACK    AD | fromHi fromLo | toHi toLo | seq | hopsLeft            "got your message seq"
+ *   PROBE  AE | fromHi fromLo | seq                                    reach test, answered by all
+ *   REPLY  AF | fromHi fromLo | toHi toLo | seq | snr (dB, 0..255)     how loudly the probe arrived
+ *   CARD   B0 | fromHi fromLo | seq | kind | fields joined by 0x1F      link, Wi-Fi or contact, at arm's length
  */
 object Wire {
     private const val TAG_TEXT = 0xA1
@@ -140,6 +143,12 @@ object Wire {
     private const val TAG_KEY = 0xAB
     private const val TAG_PRIVATE = 0xAC
     private const val TAG_ACK = 0xAD
+    private const val TAG_PROBE = 0xAE
+    private const val TAG_PROBE_REPLY = 0xAF
+    private const val TAG_CARD = 0xB0
+    const val CARD_LINK = 1
+    const val CARD_WIFI = 2
+    const val CARD_CONTACT = 3
 
     sealed class Parsed {
         class Text(val id: Int, val seq: Int, val hops: Int, val text: String, val via: Int?) : Parsed()
@@ -148,6 +157,9 @@ object Wire {
         class Key(val from: Int, val to: Int, val publicKey: ByteArray) : Parsed()
         class Private(val from: Int, val to: Int, val seq: Int, val hops: Int, val counter: Int, val sealed: ByteArray, val raw: ByteArray) : Parsed()
         class Ack(val from: Int, val to: Int, val seq: Int, val hops: Int, val raw: ByteArray) : Parsed()
+        class Probe(val from: Int, val seq: Int) : Parsed()
+        class ProbeReply(val from: Int, val to: Int, val seq: Int, val snrDb: Int) : Parsed()
+        class Card(val from: Int, val seq: Int, val kind: Int, val fields: List<String>) : Parsed()
         class Plain(val text: String) : Parsed()
     }
 
@@ -167,6 +179,15 @@ object Wire {
         byteArrayOf(TAG_ACK.toByte(), (from shr 8).toByte(), from.toByte(), (to shr 8).toByte(), to.toByte(), seq.toByte(), hops.toByte())
 
     fun relayAck(raw: ByteArray): ByteArray = raw.copyOf().also { it[6] = (it[6] - 1).toByte() }
+
+    fun probe(from: Int, seq: Int): ByteArray = byteArrayOf(TAG_PROBE.toByte(), (from shr 8).toByte(), from.toByte(), seq.toByte())
+
+    fun card(from: Int, seq: Int, kind: Int, fields: List<String>): ByteArray =
+        byteArrayOf(TAG_CARD.toByte(), (from shr 8).toByte(), from.toByte(), seq.toByte(), kind.toByte()) +
+            fields.joinToString("\u001F").toByteArray(Charsets.UTF_8)
+
+    fun probeReply(from: Int, to: Int, seq: Int, snrDb: Int): ByteArray =
+        byteArrayOf(TAG_PROBE_REPLY.toByte(), (from shr 8).toByte(), from.toByte(), (to shr 8).toByte(), to.toByte(), seq.toByte(), snrDb.coerceIn(0, 255).toByte())
 
     fun here(id: Int): ByteArray = byteArrayOf(TAG_HERE.toByte(), (id shr 8).toByte(), id.toByte())
 
@@ -195,6 +216,9 @@ object Wire {
                 TAG_HERE -> return Parsed.Here(id)
                 TAG_KEY -> if (p.size == 5 + 32) return Parsed.Key(id, u16(p, 3), p.copyOfRange(5, 37))
                 TAG_ACK -> if (p.size == 7) return Parsed.Ack(id, u16(p, 3), p[5].toInt() and 0xFF, p[6].toInt() and 0xFF, p)
+                TAG_PROBE -> if (p.size == 4) return Parsed.Probe(id, p[3].toInt() and 0xFF)
+                TAG_CARD -> if (p.size >= 5) return Parsed.Card(id, p[3].toInt() and 0xFF, p[4].toInt() and 0xFF, String(p, 5, p.size - 5, Charsets.UTF_8).split('\u001F'))
+                TAG_PROBE_REPLY -> if (p.size == 7) return Parsed.ProbeReply(id, u16(p, 3), p[5].toInt() and 0xFF, p[6].toInt() and 0xFF)
                 TAG_PRIVATE -> if (p.size >= 11) return Parsed.Private(
                     id, u16(p, 3), p[5].toInt() and 0xFF, p[6].toInt() and 0xFF,
                     ((p[7].toInt() and 0xFF) shl 24) or ((p[8].toInt() and 0xFF) shl 16) or ((p[9].toInt() and 0xFF) shl 8) or (p[10].toInt() and 0xFF),

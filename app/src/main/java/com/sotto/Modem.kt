@@ -31,6 +31,9 @@ class Modem(sampleRate: Int, samplesPerFrame: Int = SAMPLES_PER_FRAME) : AutoClo
     /** True while a frame is being received; relays wait for this to clear. */
     val receiving: Boolean get() = nativeReceiving(handle)
 
+    /** Signal over noise, in dB, of the most recent message (0 for ggwave's). */
+    val lastRxSnr: Float get() = nativeLastRxSnr(handle)
+
     /** Protocol id of the most recent message returned by [decode] or [takePending]. */
     val lastRxProtocolId: Int
         get() = nativeLastRxProtocolId(handle)
@@ -101,6 +104,7 @@ class Modem(sampleRate: Int, samplesPerFrame: Int = SAMPLES_PER_FRAME) : AutoClo
         @JvmStatic private external fun nativeDecode(handle: Long, samples: ShortArray, count: Int): ByteArray?
         @JvmStatic private external fun nativeTakePending(handle: Long): ByteArray?
         @JvmStatic private external fun nativeReceiving(handle: Long): Boolean
+        @JvmStatic private external fun nativeLastRxSnr(handle: Long): Float
         @JvmStatic private external fun nativeLastRxProtocolId(handle: Long): Int
         @JvmStatic private external fun nativeSottoProtocolIds(): IntArray
         @JvmStatic private external fun nativeGgwaveProtocolCount(): Int

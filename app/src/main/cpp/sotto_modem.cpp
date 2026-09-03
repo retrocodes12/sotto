@@ -241,7 +241,7 @@ void Decoder::reset() {
 // One line with the frame's mean tone level and the per-bin noise floor, both in dBFS
 // (a full-scale sine gives an FFT magnitude of N/2), so range tests can read signal
 // strength straight off logcat.
-void Decoder::debugStats(const char * what, size_t erasures) const {
+void Decoder::debugStats(const char * what, size_t erasures) const {   // updates m_lastSnrDb (mutable)
     if (!onDebug) return;
     const double ref = static_cast<double>(m_N) / 2 * (static_cast<double>(m_N) / 2);
     double floorMean = 0;
@@ -250,6 +250,7 @@ void Decoder::debugStats(const char * what, size_t erasures) const {
     const double tone = m_toneCount ? m_toneSum / m_toneCount : 0;
     const double toneDb = 10 * std::log10(std::max(tone, 1e-12) / ref);
     const double floorDb = 10 * std::log10(std::max(floorMean, 1e-12) / ref);
+    m_lastSnrDb = static_cast<float>(toneDb - floorDb);
     char b[640];
     int n = std::snprintf(b, sizeof b, "%s: tone %.0f dBFS, floor %.0f dBFS/bin, snr %.0f dB, %zu erasures, %d symbols; low>high",
                           what, toneDb, floorDb, toneDb - floorDb, erasures, m_toneCount);
