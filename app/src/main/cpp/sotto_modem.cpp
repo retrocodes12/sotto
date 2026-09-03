@@ -20,7 +20,7 @@ constexpr float kHeaderSnr     = 4.0f;  // best length's mean header energy must
 constexpr int   kRampSamples   = 48;    // 1 ms raised-cosine edge per symbol
 constexpr float kSyncSnr       = 2.0f;  // each sync tone must be this far above the floor
 constexpr float kSyncScore     = 4.4f;  // summed log-SNR of the four sync tones (4 * log 3)
-constexpr int   kChaseSymbols  = 6;     // least confident symbols tried at their runner-up tone
+constexpr int   kChaseSymbols  = 8;     // least confident symbols tried at their runner-up tone
 constexpr float kEraseRatio    = 1.6f;  // best/second-best below this marks an erasure
 constexpr float kFloorAlpha    = 0.02f;
 #ifndef SOTTO_TAIL_ALPHA
@@ -33,9 +33,11 @@ const Params kProtocols[] = {
     // id   name               N     first step bits parity   band at 48 kHz
     { 100, "Sotto Fast",       1024,  44,   1,   6,  32 },   // 2.06-8.02 kHz, 21 ms symbols
     { 101, "Sotto Robust",     2048,  88,   2,   6,  32 },   // 2.06-8.04 kHz, 43 ms symbols
-    { 102, "Sotto Ultrasound", 2048, 704,   2,   5,  64 },   // 16.5-19.5 kHz, 43 ms symbols. Phones measured
-                                                             // 16 dB louder at 18 kHz than 15 kHz; 2 cm
-                                                             // wavelengths fade single tones, hence rate 1/2
+    { 102, "Sotto Ultrasound", 2048, 768,   2,   4,  64 },   // 18.0-19.5 kHz, 43 ms symbols, 16 tones. The
+                                                             // first test phones were 16 dB louder at 18 kHz
+                                                             // than at 15 kHz and flat 18-19.5, so the whole
+                                                             // band sits on that peak; 2 cm wavelengths fade
+                                                             // single tones, hence rate 1/2 parity
 };
 
 uint16_t crc16(const uint8_t * d, int n) {           // CRC-16/CCITT-FALSE
@@ -467,8 +469,10 @@ bool Decoder::finishFrame(const OnMessage & onMessage) {
 
     std::vector<uint8_t> era = erasuresFor(doubtful, kEraseRatio);
     if (!era.empty() && static_cast<int>(era.size()) <= par && tryDecode(m_syms, era, out)) { debugStats("decoded", era.size()); onMessage(out.data() + 1, m_payloadLen); return true; }
-    era = erasuresFor(par / 4, kEraseRatio);
-    if (!era.empty() && tryDecode(m_syms, era, out)) { debugStats("decoded (fewer erasures)", era.size()); onMessage(out.data() + 1, m_payloadLen); return true; }
+    for (int share : { 4, 2, 1 }) {   // a quarter, half, then most of the parity spent on erasures
+        era = erasuresFor(par / share, kEraseRatio);
+        if (!era.empty() && static_cast<int>(era.size()) <= par && tryDecode(m_syms, era, out)) { debugStats("decoded (fewer erasures)", era.size()); onMessage(out.data() + 1, m_payloadLen); return true; }
+    }
     if (tryDecode(m_syms, {}, out)) { debugStats("decoded (no erasures)", 0); onMessage(out.data() + 1, m_payloadLen); return true; }
 
     const int L = std::min(kChaseSymbols, m_frameSymbols);
