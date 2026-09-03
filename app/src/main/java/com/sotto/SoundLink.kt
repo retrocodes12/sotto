@@ -76,8 +76,13 @@ class SoundLink(context: Context, private val callbacks: Callbacks) {
      * Encodes and plays [payload], blocking the transmit thread until playback has drained and
      * decoding is enabled again. Returns false if the modem refused to encode.
      */
+    /** When this phone last played anything, for presence chirps. */
+    @Volatile var lastTransmitAt: Long = 0L
+        private set
+
     fun transmit(payload: ByteArray, protocolId: Int, volume: Int): Boolean {
         val wave = modem.encode(payload, protocolId, volume) ?: return false
+        lastTransmitAt = SystemClock.elapsedRealtime()
         Log.i(TAG, "tx protocol $protocolId, ${payload.size} B, amplitude $volume, ${wave.size} samples (${wave.size / 48} ms)")
         decodeMuted.set(true)
         callbacks.onTransmitting(true)

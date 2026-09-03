@@ -56,6 +56,24 @@ class MainViewModel(app: Application) : AndroidViewModel(app), SoundLink.Callbac
 
     /** Repeat what this phone hears so phones out of earshot of the sender still get it. */
     var relayForOthers by mutableStateOf(true)
+
+    /** Ticks every few seconds so "nearby" counts and "x min ago" stay current on screen. */
+    var clockTick by mutableIntStateOf(0)
+        private set
+    val nearby: List<Int> get() { clockTick; return identity.nearby(PRESENT_FOR_MS) }
+    val farther: List<Int> get() { clockTick; return identity.farther(PRESENT_FOR_MS) }
+    private var announced = false
+    private val presence = object : Runnable {
+        override fun run() {
+            clockTick++
+            maybeChirp()
+            main.postDelayed(this, PRESENCE_TICK_MS)
+        }
+    }
+
+    init {
+        main.postDelayed(presence, PRESENCE_TICK_MS)
+    }
     /** (sender, seq) pairs heard recently: shown once, repeated at most once. */
     private val seen = LinkedHashMap<Int, Long>()
     private val pendingRelays = HashMap<Int, AtomicBoolean>()
@@ -147,6 +165,30 @@ class MainViewModel(app: Application) : AndroidViewModel(app), SoundLink.Callbac
     /** The conversation screen calls this once the mic permission exists: listening is the default. */
     fun ensureListening() {
         if (!wantListening && captureSource == null) setListening(true)
+        if (!announced && identity.name.isNotEmpty()) {
+            announced = true
+            main.postDelayed({ announce() }, 2500)
+        }
+    }
+
+    /** One hello when the app opens, so others learn we are here and we learn who answers. */
+    private fun announce() {
+        if (identity.name.isEmpty() || busy || !wantListening) return
+        val frame = Wire.hello(identity.id, identity.name)
+        val pid = textProtocolId
+        val vol = effectiveVolumeFor(pid)
+        link.post { link.waitUntilQuiet(RELAY_QUIET_WAIT_MS); link.transmit(frame, pid, vol) }
+    }
+
+    /** A three-byte "here" when this phone has been quiet for a while, so it stays counted. */
+    private fun maybeChirp() {
+        if (!inForeground || !wantListening || busy || identity.name.isEmpty()) return
+        val idle = SystemClock.elapsedRealtime() - link.lastTransmitAt
+        if (idle < CHIRP_AFTER_IDLE_MS + Random.nextLong(0, CHIRP_JITTER_MS)) return
+        val frame = Wire.here(identity.id)
+        val pid = textProtocolId
+        val vol = effectiveVolumeFor(pid)
+        link.post { link.waitUntilQuiet(RELAY_QUIET_WAIT_MS); link.transmit(frame, pid, vol) }
     }
 
     /** One line for the header. */
@@ -160,7 +202,16 @@ class MainViewModel(app: Application) : AndroidViewModel(app), SoundLink.Callbac
             captureSource == null -> "starting the mic"
             micLevel > 0.05f -> "listening, loud room"
             else -> "listening"
-        }
+        } + presenceSuffix()
+
+    private fun presenceSuffix(): String {
+        val n = nearby.size
+        val f = farther.size
+        if (n == 0 && f == 0) return ""
+        val names = nearby.take(2).mapNotNull { identity.nameFor(it) }
+        val who = if (n in 1..2 && names.size == n) names.joinToString(", ") else "$n nearby"
+        return " · " + who + (if (f > 0) " · $f farther" else "")
+    }
 
     /** Android blocks background mic access anyway; stop cleanly and resume on return. */
     fun onForeground() {
@@ -297,8 +348,8 @@ class MainViewModel(app: Application) : AndroidViewModel(app), SoundLink.Callbac
                 is Wire.Parsed.Text -> {
                     Log.i(TAG, "rx ${Modem.protocolName(protocolId)} ${payload.size} B from ${IdentityStore.tagOf(m.id)} seq ${m.seq} hops ${m.hops}${m.via?.let { " via ${IdentityStore.tagOf(it)}" } ?: ""}: ${m.text}")
                     if (m.id == identity.id) return@post              // our own message, back from a relay
-                    noteSender(m.id, protocolId)
-                    m.via?.let { identity.heard(it) }
+                    noteSender(m.id, protocolId, direct = m.via == null)
+                    m.via?.let { identity.heard(it, direct = true) }
                     val key = seenKey(m.id, m.seq, transfer = false)
                     if (markSeen(key)) {                               // heard again: someone else repeated it
                         pendingRelays[key]?.set(true)
@@ -315,6 +366,9 @@ class MainViewModel(app: Application) : AndroidViewModel(app), SoundLink.Callbac
                     if (!known) addLog(LogEntry.Kind.INFO, "${identity.nameFor(m.id)} is here", protocolId, 0)
                     sendHello(m.id, protocolId)
                 }
+                is Wire.Parsed.Here -> {
+                    if (m.id != identity.id) noteSender(m.id, protocolId)
+                }
                 is Wire.Parsed.Plain -> {
                     Log.i(TAG, "rx ${Modem.protocolName(protocolId)} ${payload.size} B plain: ${m.text}")
                     trackBurst(m.text)
@@ -327,10 +381,10 @@ class MainViewModel(app: Application) : AndroidViewModel(app), SoundLink.Callbac
     // ---- identity ------------------------------------------------------------------------
 
     /** A frame from [id] arrived. Unknown senders get our name, which invites theirs. */
-    private fun noteSender(id: Int, protocolId: Int) {
+    private fun noteSender(id: Int, protocolId: Int, direct: Boolean = true) {
         val known = identity.contacts[id]?.name?.isNotEmpty() == true
-        identity.heard(id)
-        if (!known) sendHello(id, protocolId)
+        identity.heard(id, direct = direct)
+        if (!known && direct) sendHello(id, protocolId)
     }
 
     /** Plays our name for [forId], at most once a minute per phone, after a short pause. */
@@ -455,7 +509,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app), SoundLink.Callbac
         val content = assembled.content
         Log.i(TAG, "transfer ${x.id} complete: kind $kind, ${content.size} B, from ${IdentityStore.tagOf(assembled.sender)} seq ${assembled.msgSeq} hops ${assembled.hops}")
         if (assembled.sender == identity.id) { log.removeAll { it.id == x.logId }; return }   // our own photo, forwarded back
-        if (assembled.sender != 0) { noteSender(assembled.sender, protocolId); updateLog(x.logId) { it.with(senderId = assembled.sender) } }
+        if (assembled.sender != 0) { noteSender(assembled.sender, protocolId, direct = assembled.hops == HOP_BUDGET); updateLog(x.logId) { it.with(senderId = assembled.sender) } }
         val key = seenKey(assembled.sender, assembled.msgSeq, transfer = true)
         if (markSeen(key)) { log.removeAll { it.id == x.logId }; return }   // already had this photo via another path
         if (relayForOthers && assembled.hops > 0 && kind == Transfer.KIND_JPEG) {
@@ -654,6 +708,10 @@ class MainViewModel(app: Application) : AndroidViewModel(app), SoundLink.Callbac
         private const val RELAY_MIN_WAIT_MS = 1_000L
         private const val RELAY_JITTER_MS = 2_000L
         private const val RELAY_QUIET_WAIT_MS = 6_000L
+        private const val PRESENCE_TICK_MS = 5_000L
+        private const val PRESENT_FOR_MS = 3 * 60 * 1000L
+        private const val CHIRP_AFTER_IDLE_MS = 75_000L
+        private const val CHIRP_JITTER_MS = 20_000L
         private const val MAX_LOG = 200
         private val BURST_REGEX = Regex("^TB(\\d\\d)/(\\d\\d):")
 

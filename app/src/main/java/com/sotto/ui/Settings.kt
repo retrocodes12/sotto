@@ -13,6 +13,9 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.background
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.ui.draw.clip
 import androidx.compose.material3.Button
 import androidx.compose.material3.TextField
 import androidx.compose.material3.TextFieldDefaults
@@ -83,7 +86,7 @@ fun SettingsSheet(vm: MainViewModel, onDismiss: () -> Unit) {
                 }
             }
             Text(
-                "Others see your name over your messages. The tag never changes. Say hello to introduce this phone to anyone listening.",
+                "Others see your name over your messages. The tag never changes. Phones announce themselves when opened and chirp three bytes when they have been quiet for a minute; anyone heard in the last three minutes counts as nearby.",
                 style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(top = 6.dp),
             )
             Row(Modifier.padding(top = 6.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -92,9 +95,17 @@ fun SettingsSheet(vm: MainViewModel, onDismiss: () -> Unit) {
             val people = vm.identity.contacts.entries.sortedByDescending { it.value.lastHeard }
             if (people.isNotEmpty()) {
                 Spacer(Modifier.height(12.dp))
-                Caps("Heard")
+                val near = vm.nearby.toSet()
+                val far = vm.farther.toSet()
+                Caps("Heard · ${near.size} nearby" + if (far.isNotEmpty()) " · ${far.size} farther" else "")
                 for ((id, c) in people) {
                     Row(Modifier.padding(vertical = 3.dp), verticalAlignment = Alignment.CenterVertically) {
+                        Box(
+                            Modifier.width(8.dp).height(8.dp).clip(CircleShape).background(
+                                when (id) { in near -> MaterialTheme.colorScheme.primary; in far -> MaterialTheme.colorScheme.onSurfaceVariant; else -> MaterialTheme.colorScheme.outline }
+                            )
+                        )
+                        Spacer(Modifier.width(10.dp))
                         Text(c.name.ifEmpty { "someone" }, style = MaterialTheme.typography.bodyMedium, modifier = Modifier.weight(1f))
                         Text(com.sotto.IdentityStore.tagOf(id), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                         Spacer(Modifier.width(12.dp))

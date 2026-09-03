@@ -22,7 +22,7 @@ class IdentityStore(context: Context) {
     var name: String by mutableStateOf(prefs.getString("name", "") ?: "")
         private set
 
-    class Contact(val name: String, val lastHeard: Long)
+    class Contact(val name: String, val lastHeard: Long, val lastDirect: Long = 0L)
 
     val contacts = mutableStateMapOf<Int, Contact>()
 
@@ -31,7 +31,7 @@ class IdentityStore(context: Context) {
             val j = JSONObject(prefs.getString("contacts", "{}") ?: "{}")
             for (k in j.keys()) {
                 val o = j.getJSONObject(k)
-                contacts[k.toInt()] = Contact(o.optString("name"), o.optLong("heard"))
+                contacts[k.toInt()] = Contact(o.optString("name"), o.optLong("heard"), o.optLong("direct"))
             }
         }
     }
@@ -50,18 +50,27 @@ class IdentityStore(context: Context) {
         prefs.edit().putString("name", name).apply()
     }
 
-    /** A frame from [id] arrived; keep the name we have, refresh the time. */
-    fun heard(id: Int, name: String? = null) {
+    /** A frame from [id] arrived; keep the name we have, refresh the time. [direct] means this phone heard it itself, not through a relay. */
+    fun heard(id: Int, name: String? = null, direct: Boolean = true) {
         val old = contacts[id]
-        contacts[id] = Contact(name ?: old?.name ?: "", System.currentTimeMillis())
+        val now = System.currentTimeMillis()
+        contacts[id] = Contact(name ?: old?.name ?: "", now, if (direct) now else old?.lastDirect ?: 0L)
         persist()
     }
+
+    /** Ids heard directly within [withinMs]. */
+    fun nearby(withinMs: Long, now: Long = System.currentTimeMillis()): List<Int> =
+        contacts.entries.filter { now - it.value.lastDirect <= withinMs }.map { it.key }
+
+    /** Ids heard only through a relay within [withinMs]. */
+    fun farther(withinMs: Long, now: Long = System.currentTimeMillis()): List<Int> =
+        contacts.entries.filter { now - it.value.lastHeard <= withinMs && now - it.value.lastDirect > withinMs }.map { it.key }
 
     fun nameFor(id: Int?): String? = id?.let { contacts[it]?.name?.takeIf { n -> n.isNotEmpty() } ?: tagOf(it) }
 
     private fun persist() {
         val j = JSONObject()
-        for ((k, v) in contacts) j.put(k.toString(), JSONObject().put("name", v.name).put("heard", v.lastHeard))
+        for ((k, v) in contacts) j.put(k.toString(), JSONObject().put("name", v.name).put("heard", v.lastHeard).put("direct", v.lastDirect))
         prefs.edit().putString("contacts", j.toString()).apply()
     }
 
@@ -87,17 +96,22 @@ class IdentityStore(context: Context) {
  *   TEXT   A1 | idHi idLo | seq | hopsLeft | utf-8                  as sent by its author
  *   RELAY  A4 | idHi idLo | seq | hopsLeft | viaHi viaLo | utf-8    repeated by another phone
  *   HELLO  A2 | idHi idLo | name (utf-8, at most 24 bytes)
+ *   HERE   A9 | idHi idLo                                     presence, when a phone has been quiet
  */
 object Wire {
     private const val TAG_TEXT = 0xA1
     private const val TAG_HELLO = 0xA2
     private const val TAG_RELAY = 0xA4
+    private const val TAG_HERE = 0xA9
 
     sealed class Parsed {
         class Text(val id: Int, val seq: Int, val hops: Int, val text: String, val via: Int?) : Parsed()
         class Hello(val id: Int, val name: String) : Parsed()
+        class Here(val id: Int) : Parsed()
         class Plain(val text: String) : Parsed()
     }
+
+    fun here(id: Int): ByteArray = byteArrayOf(TAG_HERE.toByte(), (id shr 8).toByte(), id.toByte())
 
     fun text(id: Int, seq: Int, hops: Int, text: String): ByteArray =
         byteArrayOf(TAG_TEXT.toByte(), (id shr 8).toByte(), id.toByte(), seq.toByte(), hops.toByte()) + text.toByteArray(Charsets.UTF_8)
@@ -121,6 +135,7 @@ object Wire {
                 TAG_TEXT -> if (p.size >= 5) return Parsed.Text(id, p[3].toInt() and 0xFF, p[4].toInt() and 0xFF, String(p, 5, p.size - 5, Charsets.UTF_8), null)
                 TAG_RELAY -> if (p.size >= 7) return Parsed.Text(id, p[3].toInt() and 0xFF, p[4].toInt() and 0xFF, String(p, 7, p.size - 7, Charsets.UTF_8), u16(p, 5))
                 TAG_HELLO -> return Parsed.Hello(id, String(p, 3, p.size - 3, Charsets.UTF_8).trim())
+                TAG_HERE -> return Parsed.Here(id)
             }
         }
         return Parsed.Plain(String(p, Charsets.UTF_8))

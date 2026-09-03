@@ -79,7 +79,7 @@ fun ConversationScreen(vm: MainViewModel) {
         Column(Modifier.fillMaxSize().padding(padding).imePadding()) {
             Header(vm, onSettings = { showSettings = true })
             if (vm.log.isEmpty()) {
-                EmptyState(Modifier.weight(1f))
+                EmptyState(Modifier.weight(1f), vm.nearby.mapNotNull { vm.identity.nameFor(it) })
             } else {
                 LazyColumn(
                     Modifier.weight(1f).fillMaxWidth(),
@@ -129,12 +129,13 @@ private fun StatusLine(vm: MainViewModel) {
 }
 
 @Composable
-private fun EmptyState(modifier: Modifier) {
+private fun EmptyState(modifier: Modifier, nearby: List<String>) {
     Column(modifier.fillMaxWidth().padding(horizontal = 40.dp), verticalArrangement = Arrangement.Center, horizontalAlignment = Alignment.CenterHorizontally) {
-        Text("Nothing yet.", style = MaterialTheme.typography.titleLarge, color = MaterialTheme.colorScheme.onBackground)
+        Text(if (nearby.isEmpty()) "Nobody nearby yet." else "${nearby.joinToString(", ")} ${if (nearby.size == 1) "is" else "are"} nearby.", style = MaterialTheme.typography.titleLarge, color = MaterialTheme.colorScheme.onBackground, textAlign = TextAlign.Center)
         Spacer(Modifier.height(8.dp))
         Text(
-            "Open Sotto on the other phone too. What you send plays as a sound too high to hear; what this phone hears shows up here.",
+            if (nearby.isEmpty()) "Open Sotto on the other phone too. Phones find each other by sound within a minute or so. What you send plays as a sound too high to hear."
+            else "Say something. It plays as a sound too high to hear, and shows up on their phone.",
             style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant, textAlign = TextAlign.Center,
         )
     }

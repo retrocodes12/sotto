@@ -145,6 +145,10 @@ payloads.
   (`UNPROCESSED`, `VOICE_RECOGNITION` or `MIC`).
 - **Message** box with a byte counter and, for Sotto protocols, the seconds of audio the
   draft will take. Send greys out above 100 bytes.
+- **Who's in reach.** The status line under the wordmark says who is nearby: phones announce
+  themselves with a hello when opened, chirp three bytes when they have been quiet for over a
+  minute, and anyone heard directly in the last three minutes counts. Phones heard only through
+  a relay show as "farther".
 - **Phones repeat for each other.** A phone that hears a message plays it again once, after a
   random pause and only when the band is quiet, unless another phone repeats it first. Two
   hops by default, so a phone in the doorway carries a message into the next room. Relayed
