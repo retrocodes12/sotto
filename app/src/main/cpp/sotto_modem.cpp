@@ -33,7 +33,7 @@ const Params kProtocols[] = {
     // id   name               N     first step bits      band at 48 kHz
     { 100, "Sotto Fast",       1024,  44,   1,   6 },   // 2.06-8.02 kHz, 21 ms symbols
     { 101, "Sotto Robust",     2048,  88,   2,   6 },   // 2.06-8.04 kHz, 43 ms symbols
-    { 102, "Sotto Ultrasound", 2048, 640,   2,   5 },   // 15.0-18.0 kHz, 43 ms symbols
+    { 102, "Sotto Ultrasound", 2048, 704,   2,   5 },   // 16.5-19.5 kHz, 43 ms symbols; phones measured 16 dB louder at 18 kHz than 15 kHz
 };
 
 uint16_t crc16(const uint8_t * d, int n) {           // CRC-16/CCITT-FALSE
