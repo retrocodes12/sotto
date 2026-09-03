@@ -506,11 +506,20 @@ private:
     bool FindErrors(const Poly *error_loc, size_t msg_in_size) {
         Poly *err = &polynoms[ID_ERRORS];
 
+        /* Sotto patch: an empty locator would make errs wrap to 255 below and every
+         * position a "root"; there is nothing to correct in that case. */
+        if(error_loc->length == 0 || error_loc->length - 1 > msg_in_size) return false;
+
         uint8_t errs = error_loc->length - 1;
         err->length = 0;
 
         for(uint8_t i = 0; i < msg_in_size; i++) {
             if(gf::poly_eval(error_loc, gf::pow(2, i)) == 0) {
+                /* Sotto patch: a degenerate locator (erasures plus too many errors) can have
+                 * more roots than the polynomial has room for; the original appended past
+                 * the end (assert in debug, heap overflow in release). More roots than the
+                 * locator's degree already means the codeword is uncorrectable. */
+                if(err->length >= errs) return false;
                 err->Append(msg_in_size - 1 - i);
             }
         }
