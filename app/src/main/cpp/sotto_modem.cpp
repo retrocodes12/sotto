@@ -15,8 +15,12 @@ namespace sotto {
 namespace {
 
 constexpr int   kSyncSymbols   = 4;
+constexpr int   kHeaderSymbols = 6;     // the length, as six hash-mapped tones, decoded by likelihood
+constexpr float kHeaderSnr     = 4.0f;  // best length's mean header energy must be this far above the floor
 constexpr int   kRampSamples   = 48;    // 1 ms raised-cosine edge per symbol
-constexpr float kSyncSnr       = 3.0f;  // each sync tone must be this far above the floor
+constexpr float kSyncSnr       = 2.0f;  // each sync tone must be this far above the floor
+constexpr float kSyncScore     = 4.4f;  // summed log-SNR of the four sync tones (4 * log 3)
+constexpr int   kChaseSymbols  = 6;     // least confident symbols tried at their runner-up tone
 constexpr float kEraseRatio    = 1.6f;  // best/second-best below this marks an erasure
 constexpr float kFloorAlpha    = 0.02f;
 #ifndef SOTTO_TAIL_ALPHA
@@ -41,21 +45,18 @@ uint16_t crc16(const uint8_t * d, int n) {           // CRC-16/CCITT-FALSE
     return crc;
 }
 
-uint8_t crc4(uint8_t v) {                            // CRC-4-ITU over the 8 bits of v
-    uint8_t crc = 0;
-    for (int b = 7; b >= 0; --b) {
-        const bool bit = (((v >> b) & 1) ^ ((crc >> 3) & 1)) != 0;
-        crc = static_cast<uint8_t>((crc << 1) & 0xF);
-        if (bit) crc ^= 0x3;
-    }
-    return crc;
-}
-
 int parityBytes(int frameBytes) {
     return std::min(32, std::max(6, (frameBytes + 1) / 2));
 }
 
-int headerSymbols(int bits) { return 2 * ((12 + bits - 1) / bits); }
+// Tone for header symbol k of a payload of length len: a hash, so that any two lengths
+// differ in nearly every one of the six symbols and the decoder can tell them apart by
+// energy alone.
+int headerTone(int len, int k, int M) {
+    uint32_t h = static_cast<uint32_t>(len + 1) * 0x9E3779B1u ^ static_cast<uint32_t>(k + 1) * 0x85EBCA6Bu;
+    h ^= h >> 15; h *= 0x2C1B3C6Du; h ^= h >> 12;
+    return static_cast<int>(h % static_cast<uint32_t>(M));
+}
 
 int syncTone(int k, int M) { return kSyncSeed[k] % M; }
 
@@ -95,7 +96,7 @@ const Params * protocolById(int id) {
 int symbolCount(const Params & p, int n) {
     const int frame = n + 3;
     const int code = frame + parityBytes(frame);
-    return kSyncSymbols + headerSymbols(p.bits) + (code * 8 + p.bits - 1) / p.bits;
+    return kSyncSymbols + kHeaderSymbols + (code * 8 + p.bits - 1) / p.bits;
 }
 
 float airtimeSeconds(const Params & p, int n) {
@@ -121,10 +122,7 @@ std::vector<int16_t> encode(const Params & p, const uint8_t * payload, int n, fl
     // symbols: sync, header twice, data
     std::vector<int> syms;
     for (int k = 0; k < kSyncSymbols; ++k) syms.push_back(syncTone(k, M));
-    const uint16_t hdr = static_cast<uint16_t>((n << 4) | crc4(static_cast<uint8_t>(n)));
-    const uint8_t hdrBytes[2] = { static_cast<uint8_t>(hdr >> 4), static_cast<uint8_t>((hdr & 0xF) << 4) };
-    packBits(hdrBytes, 12, p.bits, syms);
-    packBits(hdrBytes, 12, p.bits, syms);
+    for (int k = 0; k < kHeaderSymbols; ++k) syms.push_back(headerTone(n, k, M));
     packBits(code.data(), static_cast<int>(code.size()) * 8, p.bits, syms);
 
     // waveform: one tone per symbol with raised-cosine edges
@@ -175,6 +173,8 @@ Decoder::Decoder(const Params & p)
     }
     m_hist.assign(static_cast<size_t>(kHistory) * m_bandBins, 0.0f);
     m_floor.assign(m_bandBins, 1e-6f);
+    m_binSum.assign(m_bandBins, 0.0);
+    m_binCount.assign(m_bandBins, 0);
 }
 
 // In-place N/2-point complex FFT of (m_re, m_im), then the standard split so that
@@ -204,9 +204,39 @@ size_t Decoder::heapBytes() const {
 void Decoder::reset() {
     m_state = State::Idle;
     m_syms.clear();
-    m_erased.clear();
+    m_second.clear();
+    m_conf.clear();
     m_payloadLen = -1;
     m_frameSymbols = 0;
+    m_toneSum = 0;
+    m_toneCount = 0;
+    std::fill(m_binSum.begin(), m_binSum.end(), 0.0);
+    std::fill(m_binCount.begin(), m_binCount.end(), 0);
+}
+
+// One line with the frame's mean tone level and the per-bin noise floor, both in dBFS
+// (a full-scale sine gives an FFT magnitude of N/2), so range tests can read signal
+// strength straight off logcat.
+void Decoder::debugStats(const char * what, size_t erasures) const {
+    if (!onDebug) return;
+    const double ref = static_cast<double>(m_N) / 2 * (static_cast<double>(m_N) / 2);
+    double floorMean = 0;
+    for (int i = 0; i < m_bandBins; ++i) floorMean += m_floor[i];
+    floorMean /= m_bandBins;
+    const double tone = m_toneCount ? m_toneSum / m_toneCount : 0;
+    const double toneDb = 10 * std::log10(std::max(tone, 1e-12) / ref);
+    const double floorDb = 10 * std::log10(std::max(floorMean, 1e-12) / ref);
+    char b[320];
+    int n = std::snprintf(b, sizeof b, "%s: tone %.0f dBFS, floor %.0f dBFS/bin, snr %.0f dB, %zu erasures, %d symbols; low>high",
+                          what, toneDb, floorDb, toneDb - floorDb, erasures, m_toneCount);
+    // mean received tone level per eighth of the band, both sets merged by frequency order
+    const int groups = 8, per = m_bandBins / groups;
+    for (int gI = 0; gI < groups && n < static_cast<int>(sizeof b) - 8; ++gI) {
+        double sum = 0; int cnt = 0;
+        for (int i = gI * per; i < (gI + 1) * per; ++i) { sum += m_binSum[i]; cnt += m_binCount[i]; }
+        n += std::snprintf(b + n, sizeof b - n, cnt ? " %.0f" : " .", cnt ? 10 * std::log10(std::max(sum / cnt, 1e-12) / ref) : 0.0);
+    }
+    onDebug(b);
 }
 
 const float * Decoder::row(int64_t hop) const {
@@ -228,19 +258,22 @@ void Decoder::feed(const int16_t * samples, int n, const OnMessage & onMessage) 
 // the last sync symbol ends exactly at `hop`). score is the summed log-SNR.
 bool Decoder::syncScore(int64_t hop, float & score) const {
     score = 0;
+    int wins = 0;
     for (int k = 0; k < kSyncSymbols; ++k) {
         const int64_t h = hop - 4 * (kSyncSymbols - 1 - k);
         if (h < 0) return false;
-        const float * e = row(h) + ((k & 1) ? m_M : 0);
+        const int base = (k & 1) ? m_M : 0;
+        const float * e = row(h) + base;
         const int want = syncTone(k, m_M);
-        int best = 0;
-        for (int v = 1; v < m_M; ++v) if (e[v] > e[best]) best = v;
-        if (best != want) return false;
-        const float snr = e[want] / m_floor[((k & 1) ? m_M : 0) + want];
+        int above = 0;                       // tones louder than the expected one
+        for (int v = 0; v < m_M; ++v) if (e[v] > e[want]) ++above;
+        if (above == 0) ++wins;
+        else if (above > 2) return false;    // expected tone not even in the top three
+        const float snr = e[want] / m_floor[base + want];
         if (snr < kSyncSnr) return false;
         score += std::log(snr);
     }
-    return true;
+    return wins >= kSyncSymbols - 1 && score >= kSyncScore;
 }
 
 void Decoder::onHop(const OnMessage & onMessage) {
@@ -296,16 +329,24 @@ void Decoder::onHop(const OnMessage & onMessage) {
             if (onDebug) onDebug("sync");
             m_state = State::Decoding;
             m_t0 = m_syncBestHop;
-            m_g = kSyncSymbols;
-            m_nextHop = m_t0 + 4;
             m_syms.clear();
-            m_erased.clear();
+            m_second.clear();
+            m_conf.clear();
             m_payloadLen = -1;
         }
         return;
     }
 
-    // Decoding: one symbol every four hops
+    // Decoding. First the header, once every header window plus one hop of slack is in
+    // the history; it also settles the exact symbol alignment. Then one data symbol
+    // every four hops.
+    if (m_payloadLen < 0) {
+        if (m_hopIndex == m_t0 + 4 * kHeaderSymbols + 1 && !decideHeader()) {
+            if (onDebug) onDebug("header failed");
+            reset();
+        }
+        return;
+    }
     if (m_hopIndex != m_nextHop) return;
     {
         // Reverb cancellation: during the previous symbol's window this set's bins carried
@@ -314,79 +355,122 @@ void Decoder::onHop(const OnMessage & onMessage) {
         const int base = (m_g & 1) ? m_M : 0;
         const float * prev = row(m_hopIndex - 4) + base;
         const float * cur = e + base;
-        float sb = -1, ss = -1; int best = 0;
+        float sb = -1, ss = -1; int best = 0, second = 0;
         for (int v = 0; v < m_M; ++v) {
             const float sc = std::max(0.0f, cur[v] - kTailAlpha * prev[v]);
-            if (sc > sb) { ss = sb; sb = sc; best = v; }
-            else if (sc > ss) ss = sc;
+            if (sc > sb) { ss = sb; second = best; sb = sc; best = v; }
+            else if (sc > ss) { ss = sc; second = v; }
         }
         m_syms.push_back(best);
-        m_erased.push_back(ss > 0 && sb < kEraseRatio * ss ? 1 : 0);
+        m_second.push_back(second);
+        m_conf.push_back(ss > 0 ? sb / ss : 1e9f);
+        m_toneSum += cur[best];
+        ++m_toneCount;
+        m_binSum[base + best] += cur[best];
+        ++m_binCount[base + best];
         ++m_g;
         m_nextHop += 4;
     }
 
-    const int hdr = headerSymbols(m_p.bits);
-    if (m_payloadLen < 0) {
-        if (static_cast<int>(m_syms.size()) == hdr && !finishHeader()) { if (onDebug) onDebug("header failed"); reset(); }
-        return;
-    }
-    if (static_cast<int>(m_syms.size()) == hdr + m_frameSymbols) {
+    if (static_cast<int>(m_syms.size()) == m_frameSymbols) {
         finishFrame(onMessage);
         reset();
     }
 }
 
-bool Decoder::finishHeader() {
-    const int per = headerSymbols(m_p.bits) / 2;
-    for (int copy = 0; copy < 2; ++copy) {
-        uint8_t b[2];
-        unpackBits(m_syms.data() + copy * per, per, m_p.bits, 12, b);
-        const uint16_t hdr = static_cast<uint16_t>((b[0] << 4) | (b[1] >> 4));
-        const int len = hdr >> 4;
-        if (crc4(static_cast<uint8_t>(len)) == (hdr & 0xF) && len <= kMaxPayload) {
-            m_payloadLen = len;
-            const int frame = len + 3;
-            const int code = frame + parityBytes(frame);
-            m_frameSymbols = (code * 8 + m_p.bits - 1) / m_p.bits;
-            return true;
+// Maximum-likelihood header: for every possible length and for the sync alignment plus
+// one hop either side, sum the received energy at the six tones that length would have
+// used. The best sum wins; its alignment becomes the frame's. Header symbol k is symbol
+// kSyncSymbols + k and its window ends at hop t0 + 4 * (k + 1).
+bool Decoder::decideHeader() {
+    double bestSum = -1; int bestLen = -1, bestOff = 0;
+    for (int off = -1; off <= 1; ++off) {
+        for (int len = 0; len <= kMaxPayload; ++len) {
+            double sum = 0;
+            for (int k = 0; k < kHeaderSymbols; ++k) {
+                const int g = kSyncSymbols + k;
+                sum += row(m_t0 + off + 4 * (k + 1))[((g & 1) ? m_M : 0) + headerTone(len, k, m_M)];
+            }
+            if (sum > bestSum) { bestSum = sum; bestLen = len; bestOff = off; }
         }
     }
-    return false;
+    double floorMean = 0;
+    for (int i = 0; i < m_bandBins; ++i) floorMean += m_floor[i];
+    floorMean /= m_bandBins;
+    if (bestSum < kHeaderSnr * kHeaderSymbols * floorMean) return false;
+
+    m_t0 += bestOff;
+    m_payloadLen = bestLen;
+    const int frame = bestLen + 3;
+    const int code = frame + parityBytes(frame);
+    m_frameSymbols = (code * 8 + m_p.bits - 1) / m_p.bits;
+    m_g = kSyncSymbols + kHeaderSymbols;
+    m_nextHop = m_t0 + 4 * (m_g - (kSyncSymbols - 1));
+    return true;
 }
 
-bool Decoder::finishFrame(const OnMessage & onMessage) {
-    const int hdr = headerSymbols(m_p.bits);
+// One Reed-Solomon attempt on a symbol vector: unpack, correct, check length and CRC.
+bool Decoder::tryDecode(const std::vector<int> & syms, const std::vector<uint8_t> & erasures, std::vector<uint8_t> & out) const {
     const int frame = m_payloadLen + 3;
     const int par = parityBytes(frame);
     const int code = frame + par;
     std::vector<uint8_t> codeBytes(code);
-    unpackBits(m_syms.data() + hdr, m_frameSymbols, m_p.bits, code * 8, codeBytes.data());
+    unpackBits(syms.data(), m_frameSymbols, m_p.bits, code * 8, codeBytes.data());
+    RS::ReedSolomon rs(static_cast<uint8_t>(frame), static_cast<uint8_t>(par));
+    std::vector<uint8_t> era(erasures);
+    const int rc = era.empty() ? rs.Decode(codeBytes.data(), out.data())
+                               : rs.Decode(codeBytes.data(), out.data(), era.data(), era.size());
+    if (rc != 0 || out[0] != m_payloadLen) return false;
+    const uint16_t crc = static_cast<uint16_t>((out[frame - 2] << 8) | out[frame - 1]);
+    return crc16(out.data(), frame - 2) == crc;
+}
 
-    // erased symbols -> erased byte positions in the codeword
-    std::vector<uint8_t> erasures;
-    for (int s = 0; s < m_frameSymbols; ++s) {
-        if (!m_erased[hdr + s]) continue;
-        const int b0 = (s * m_p.bits) / 8, b1 = std::min(code - 1, (s * m_p.bits + m_p.bits - 1) / 8);
-        for (int b = b0; b <= b1; ++b) {
-            if (std::find(erasures.begin(), erasures.end(), static_cast<uint8_t>(b)) == erasures.end())
-                erasures.push_back(static_cast<uint8_t>(b));
+// Decode ladder, cheapest first: erasures for every doubtful symbol, then only the
+// most doubtful up to half the parity, then none, then chase decoding: the least
+// confident symbols swapped for their runner-up tones in every combination.
+bool Decoder::finishFrame(const OnMessage & onMessage) {
+    const int frame = m_payloadLen + 3;
+    const int par = parityBytes(frame);
+    const int code = frame + par;
+    std::vector<uint8_t> out(frame);
+
+    // symbols ordered by confidence, least confident first
+    std::vector<int> order(m_frameSymbols);
+    for (int i = 0; i < m_frameSymbols; ++i) order[i] = i;
+    std::sort(order.begin(), order.end(), [&](int a, int b) { return m_conf[a] < m_conf[b]; });
+
+    auto erasuresFor = [&](int count, float maxRatio) {
+        std::vector<uint8_t> era;
+        for (int i = 0; i < count && i < m_frameSymbols; ++i) {
+            const int sIdx = order[i];
+            if (m_conf[sIdx] >= maxRatio) break;
+            const int b0 = (sIdx * m_p.bits) / 8, b1 = std::min(code - 1, (sIdx * m_p.bits + m_p.bits - 1) / 8);
+            for (int b = b0; b <= b1; ++b)
+                if (std::find(era.begin(), era.end(), static_cast<uint8_t>(b)) == era.end()) era.push_back(static_cast<uint8_t>(b));
+        }
+        return era;
+    };
+
+    int doubtful = 0;
+    for (int i = 0; i < m_frameSymbols; ++i) if (m_conf[i] < kEraseRatio) ++doubtful;
+
+    std::vector<uint8_t> era = erasuresFor(doubtful, kEraseRatio);
+    if (!era.empty() && static_cast<int>(era.size()) <= par && tryDecode(m_syms, era, out)) { debugStats("decoded", era.size()); onMessage(out.data() + 1, m_payloadLen); return true; }
+    era = erasuresFor(par / 4, kEraseRatio);
+    if (!era.empty() && tryDecode(m_syms, era, out)) { debugStats("decoded (fewer erasures)", era.size()); onMessage(out.data() + 1, m_payloadLen); return true; }
+    if (tryDecode(m_syms, {}, out)) { debugStats("decoded (no erasures)", 0); onMessage(out.data() + 1, m_payloadLen); return true; }
+
+    const int L = std::min(kChaseSymbols, m_frameSymbols);
+    std::vector<int> syms(m_syms);
+    for (int weight = 1; weight <= L; ++weight) {
+        for (int mask = 1; mask < (1 << L); ++mask) {
+            if (__builtin_popcount(mask) != weight) continue;
+            for (int i = 0; i < L; ++i) syms[order[i]] = (mask >> i) & 1 ? m_second[order[i]] : m_syms[order[i]];
+            if (tryDecode(syms, {}, out)) { debugStats("decoded (chase)", weight); onMessage(out.data() + 1, m_payloadLen); return true; }
         }
     }
-
-    std::vector<uint8_t> out(frame);
-    RS::ReedSolomon rs(static_cast<uint8_t>(frame), static_cast<uint8_t>(par));
-    bool ok = false;
-    if (!erasures.empty() && static_cast<int>(erasures.size()) <= par) {
-        ok = rs.Decode(codeBytes.data(), out.data(), erasures.data(), erasures.size()) == 0;
-    }
-    if (!ok) ok = rs.Decode(codeBytes.data(), out.data()) == 0;
-    if (!ok) { if (onDebug) { char b[64]; std::snprintf(b, sizeof b, "parity failed, %zu erasures", erasures.size()); onDebug(b); } return false; }
-    if (out[0] != m_payloadLen) { if (onDebug) onDebug("length mismatch"); return false; }
-    const uint16_t crc = static_cast<uint16_t>((out[frame - 2] << 8) | out[frame - 1]);
-    if (crc16(out.data(), frame - 2) != crc) { if (onDebug) onDebug("crc failed"); return false; }
-    onMessage(out.data() + 1, m_payloadLen);
-    return true;
+    debugStats("parity failed", doubtful);
+    return false;
 }
 
 } // namespace sotto

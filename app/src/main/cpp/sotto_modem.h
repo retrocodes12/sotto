@@ -63,8 +63,9 @@ private:
     void onHop(const OnMessage & onMessage);
     bool syncScore(int64_t hop, float & score) const;
     const float * row(int64_t hop) const;
-    bool finishHeader();
+    bool decideHeader();
     bool finishFrame(const OnMessage & onMessage);
+    bool tryDecode(const std::vector<int> & syms, const std::vector<uint8_t> & erasures, std::vector<uint8_t> & out) const;
     void reset();
 
     Params m_p;
@@ -76,15 +77,18 @@ private:
     void fft();
 
     // per-hop band energies, one row per hop, ring of kHistory rows
-    static constexpr int kHistory = 16;
+    static constexpr int kHistory = 32;
     std::vector<float> m_hist; int64_t m_hopIndex = -1;
     std::vector<float> m_floor; bool m_floorInit = false;
 
     State m_state = State::Idle;
     int64_t m_syncBestHop = 0; float m_syncBestScore = 0; int64_t m_syncDeadline = 0;
     int64_t m_t0 = 0; int64_t m_nextHop = 0; int m_g = 0;
-    std::vector<int> m_syms; std::vector<uint8_t> m_erased;
+    std::vector<int> m_syms, m_second; std::vector<float> m_conf;   // tone, runner-up, best/second energy ratio
     int m_payloadLen = -1; int m_frameSymbols = 0;
+    double m_toneSum = 0; int m_toneCount = 0;   // chosen-bin energy over the frame, for level stats
+    std::vector<double> m_binSum; std::vector<int> m_binCount;   // per-bin, to see the channel's shape
+    void debugStats(const char * what, size_t erasures) const;
 };
 
 } // namespace sotto

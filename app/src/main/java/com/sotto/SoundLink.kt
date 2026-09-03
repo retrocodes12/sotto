@@ -78,6 +78,7 @@ class SoundLink(context: Context, private val callbacks: Callbacks) {
      */
     fun transmit(payload: ByteArray, protocolId: Int, volume: Int): Boolean {
         val wave = modem.encode(payload, protocolId, volume) ?: return false
+        Log.i(TAG, "tx protocol $protocolId, ${payload.size} B, amplitude $volume, ${wave.size} samples (${wave.size / 48} ms)")
         decodeMuted.set(true)
         callbacks.onTransmitting(true)
         try {

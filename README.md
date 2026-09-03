@@ -3,7 +3,7 @@
   <img alt="sotto. The word hello as the Sotto modem sends it, drawn as a spectrogram: a single tone hopping between 64 frequencies, 27 symbols, 0.58 seconds." src="docs/hero-light.svg" width="100%">
 </picture>
 
-<sub>The banner is not decoration. It is the word “hello” as this app sends it, drawn from the actual 48 kHz waveform: four sync tones, the length twice, then 14 bytes of Reed–Solomon-protected data, one tone per six bits. 27 tones, 0.58 seconds of air.</sub>
+<sub>The banner is not decoration. It is the word “hello” as this app sends it, drawn from the actual 48 kHz waveform: four sync tones, six tones that spell the length, then 14 bytes of Reed–Solomon-protected data, one tone per six bits. 29 tones, 0.62 seconds of air.</sub>
 
 # sotto
 
@@ -20,9 +20,9 @@ next to it so the two can be compared on real phones with the built-in test burs
 |---|---|
 | **Carrier** | one tone at a time, 2.1–8.0 kHz audible or 15–18 kHz ultrasound |
 | **Payload** | up to 100 bytes of UTF-8 per message |
-| **Speed** | 5 bytes in 0.58 s, 20 bytes in 1.17 s, 100 bytes in 4.0 s |
+| **Speed** | 5 bytes in 0.62 s, 20 bytes in 1.22 s, 100 bytes in 4.1 s |
 | **Integrity** | Reed–Solomon parity and a CRC-16. A message decodes intact or not at all |
-| **Modem** | 500 lines of C++, 24 KB of decoder heap, 3 ms of CPU per second of audio |
+| **Modem** | 550 lines of C++, 32 KB of decoder heap, 3 ms of CPU per second of audio |
 | **Stack** | Kotlin, Jetpack Compose, C++ through the NDK, minSdk 26 |
 
 ## How a message travels
@@ -31,7 +31,7 @@ next to it so the two can be compared on real phones with the built-in test burs
 sequenceDiagram
     participant A as Phone A (sending)
     participant B as Phone B (listening)
-    Note over A: bytes -> parity + CRC -> 6-bit symbols -> one tone each:<br/>4 sync tones, the length twice, then the data
+    Note over A: bytes -> parity + CRC -> 6-bit symbols -> one tone each:<br/>4 sync tones, 6 length tones, then the data
     A->>A: pause its own decoder
     A->>B: AudioTrack plays the tones through the speaker
     Note over B: AudioRecord at 48 kHz mono, 1024-sample frames,<br/>own thread, echo cancel / noise / AGC switched off
@@ -57,12 +57,18 @@ symbol carries six bits with the whole speaker behind it. That single decision i
 - **Tail cancellation.** During a symbol's window, the other set's bins hold nothing but the
   decaying tail of earlier symbols. Half of that energy is subtracted before the tone is
   picked. It took Fast mode from 96% to 100% in the simulated room.
-- **A four-tone sync word** instead of ggwave's two 340 ms markers. Symbol timing comes from
-  the best-scoring FFT hop, accurate to a quarter symbol, which the alternating sets forgive.
-- **The length sent twice**, each copy with a CRC-4, before the data.
-- **Reed–Solomon plus CRC-16.** Parity scales with the frame (6 to 32 bytes). Symbols whose
-  best tone barely beats the runner-up are passed to the decoder as erasures, which it can
-  fix at twice the rate of unknown errors. The CRC means noise never decodes to garbage.
+- **A four-tone sync word** instead of ggwave's two 340 ms markers. Three of the four tones
+  must win their set outright and the fourth must place in the top three, so one unlucky
+  tone does not lose the frame.
+- **The length as six hashed tones, decoded by likelihood.** The receiver scores all 141
+  possible lengths against the raw tone energies, at the sync alignment and one FFT hop
+  either side, and takes the best. It never snaps on a bad bit, and the winning alignment
+  corrects the symbol timing for everything that follows. This replaced a twice-sent
+  CRC-4 header after a real-phone burst lost exactly one frame that way.
+- **Reed–Solomon plus CRC-16, decoded on a ladder.** Parity scales with the frame (6 to 32
+  bytes). Doubtful symbols go in as erasures, then fewer erasures, then none, then chase
+  decoding: the six least confident symbols swapped for their runner-up tones in every
+  combination until parity and CRC agree. The CRC means noise never decodes to garbage.
 - **Streaming.** The decoder delivers the message the moment the last symbol has arrived.
   No end marker, no post-analysis.
 
@@ -83,22 +89,22 @@ Free field, signal peak −21 dBFS at the microphone:
 
 | noise, dBFS | −40 | −30 | −25 | −20 | −15 | −10 | −5 |
 |---|---|---|---|---|---|---|---|
-| **Sotto Fast** | 100 | 100 | 100 | 100 | 100 | 96 | 0 |
-| **Sotto Robust** | 100 | 100 | 100 | 100 | 100 | 100 | 67 |
-| ggwave Normal | 100 | 100 | 92 | 0 | 0 | 0 | 0 |
+| **Sotto Fast** | 100 | 100 | 100 | 100 | 100 | 100 | 0 |
+| **Sotto Robust** | 100 | 100 | 100 | 100 | 100 | 100 | 83 |
+| ggwave Normal | 100 | 100 | 100 | 8 | 0 | 0 | 0 |
 | ggwave Fast | 100 | 100 | 96 | 0 | 0 | 0 | 0 |
-| ggwave Fastest | 100 | 100 | 100 | 0 | 0 | 0 | 0 |
+| ggwave Fastest | 100 | 100 | 96 | 0 | 0 | 0 | 0 |
 
 Room, same signal:
 
 | noise, dBFS | −40 | −30 | −25 | −20 | −15 | −10 | −5 |
 |---|---|---|---|---|---|---|---|
-| **Sotto Fast** | 100 | 100 | 100 | 100 | 75 | 4 | 0 |
-| **Sotto Robust** | 100 | 100 | 100 | 100 | 83 | 46 | 0 |
-| ggwave Normal | 100 | 96 | 17 | 0 | 0 | 0 | 0 |
-| ggwave Fast | 100 | 83 | 21 | 4 | 0 | 0 | 0 |
-| ggwave Fastest | 100 | 75 | 17 | 0 | 0 | 0 | 0 |
-| ggwave Fast, hard-clipped | 38 | 54 | 42 | 12 | 0 | 0 | 0 |
+| **Sotto Fast** | 100 | 100 | 100 | 100 | 67 | 4 | 0 |
+| **Sotto Robust** | 100 | 100 | 100 | 100 | 100 | 71 | 0 |
+| ggwave Normal | 100 | 92 | 29 | 0 | 0 | 0 | 0 |
+| ggwave Fast | 100 | 88 | 38 | 0 | 0 | 0 | 0 |
+| ggwave Fastest | 96 | 88 | 25 | 0 | 0 | 0 | 0 |
+| ggwave Fast, hard-clipped | 42 | 29 | 46 | 25 | 0 | 0 | 0 |
 
 Sotto Fast keeps decoding with noise 6 dB above the signal's own peak; ggwave stops about
 10 dB before that in free field and 15 dB before it in the room. The last row is what
@@ -107,9 +113,9 @@ breaks it even without noise, which is why the app caps ggwave's amplitude at 25
 
 | | airtime, 20 B | airtime, 100 B | decoder heap | decoder CPU |
 |---|---|---|---|---|
-| Sotto Fast | 1.17 s | 4.0 s | 24 KB | 2.9 ms per s of audio |
-| Sotto Robust | 2.35 s | 8.0 s | 40 KB | 3.1 ms |
-| Sotto Ultrasound | 2.82 s | 9.6 s | 36 KB | 3.0 ms |
+| Sotto Fast | 1.22 s | 4.1 s | 32 KB | 2.9 ms per s of audio |
+| Sotto Robust | 2.43 s | 8.1 s | 48 KB | 3.1 ms |
+| Sotto Ultrasound | 2.82 s | 9.6 s | 40 KB | 3.0 ms |
 | ggwave Fast | 2.09 s | 6.8 s | 8.2 MB | 0.6 ms idle, more while analysing |
 | ggwave Fastest | 1.39 s | 3.8 s | 8.2 MB | |
 
@@ -123,8 +129,8 @@ one. The log tells you which protocol each message arrived on.
 
 | Protocol | Band | Symbol | 20 bytes | Reach for it when |
 |---|---|---|---|---|
-| **Sotto Fast** (default) | 2.1–8.0 kHz | 21 ms | 1.17 s | most of the time |
-| Sotto Robust | 2.1–8.0 kHz, tones 47 Hz apart | 43 ms | 2.35 s | far apart, loud room, or someone is walking |
+| **Sotto Fast** (default) | 2.1–8.0 kHz | 21 ms | 1.22 s | most of the time |
+| Sotto Robust | 2.1–8.0 kHz, tones 47 Hz apart | 43 ms | 2.43 s | far apart, loud room, or someone is walking |
 | Sotto Ultrasound | 15–18 kHz | 43 ms, 5 bits | 2.82 s | it must be silent to adults; needs hardware that reaches 18 kHz |
 | ggwave Normal / Fast / Fastest | 1.8–6.2 kHz | 192 / 128 / 64 ms chunks | 2.8 / 2.1 / 1.4 s | comparison, and talking to other ggwave software |
 | ggwave Ultrasound ×3 | 15–19 kHz | as above | 2.8 / 2.1 / 1.4 s | same, above hearing |
@@ -139,12 +145,13 @@ payloads.
   (`UNPROCESSED`, `VOICE_RECOGNITION` or `MIC`).
 - **Message** box with a byte counter and, for Sotto protocols, the seconds of audio the
   draft will take. Send greys out above 100 bytes.
-- **Protocol** dropdown and a **Tx amplitude** slider (default 90; ggwave protocols are
+- **Protocol** dropdown and a **Tx amplitude** slider (default 100; ggwave protocols are
   capped at 25 so their six-tone sum does not clip).
 - **Test burst**: a fixed 20-byte message ten times, 2 s apart. The receiving phone counts
   `received / 10`, so distance, room and modem can be scored in one number.
 - **Log**: time, direction, protocol, size, text. Newest first.
-- A red banner when media volume is under 70%, with a button that opens the volume panel.
+- A banner whenever media volume is under 100%, red under 70%, with a button that opens
+  the volume panel. Every 6 dB of speaker level doubles the range.
 - A blocking screen if the microphone permission is refused, with a way into app settings.
 
 ## Install
@@ -182,9 +189,10 @@ the artwork tools build with plain `g++`; the commands are in their headers.
 5. Now score it. On B tap **Reset** under "Received". On A tap **Send burst**. Half a minute
    later B shows `n / 10`. Switch A to **ggwave Fast** and send the burst again from the same
    spot. Walk apart, repeat both. Write the numbers down; they are the whole point.
-6. `adb logcat -s sotto-jni SoundLink` shows the capture source, which audio effects were
-   switched off, every sync the modem found, and why any frame was dropped (header, parity
-   with the erasure count, or CRC).
+6. `adb logcat -s sotto-jni SoundLink Sotto` shows the capture source, which audio effects
+   were switched off, every sync the modem found, and for every frame the mean tone level,
+   the noise floor per bin, the SNR, the received level across eight slices of the band,
+   and why it was dropped if it was.
 
 Things that hurt: a case over the mic, a Bluetooth speaker or headset stealing the output on
 the sending phone, and ultrasound on hardware that rolls off before 18 kHz.
@@ -209,9 +217,10 @@ the sending phone, and ultrasound on hardware that rolls off before 18 kHz.
 
 ## Status
 
-v0.2. Builds. The modem decodes 21 of 21 payload sizes in a clean host round trip and the
-table above in the simulated room. ggwave's wrapper passes the same 27-case round trip.
-Numbers from two real phones at real distances are the next thing this README should contain.
+v0.3. First contact on real hardware (two phones, Sotto Ultrasound): 10 of 10 at 25 cm with
+30 dB of SNR, 9 of 10 at about a metre with 25 dB. The one miss was a header lost to a
+timing slip, which is what the likelihood header now fixes. More distances, the audible
+modes and the ggwave comparison on the same phones are next.
 
 ## Layout
 

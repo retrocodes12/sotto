@@ -183,7 +183,7 @@ private fun MainScreen(vm: MainViewModel) {
             }
             items(vm.log) { LogRow(it) }
         }
-        if (vm.mediaVolume < LOW_VOLUME) VolumeWarning(vm)
+        if (vm.mediaVolume < 1f) VolumeWarning(vm, severe = vm.mediaVolume < LOW_VOLUME)
         ComposeRow(vm)
     }
 }
@@ -337,14 +337,17 @@ private fun LogRow(e: LogEntry) {
 }
 
 @Composable
-private fun VolumeWarning(vm: MainViewModel) {
+private fun VolumeWarning(vm: MainViewModel, severe: Boolean) {
+    val bg = if (severe) MaterialTheme.colorScheme.errorContainer else MaterialTheme.colorScheme.surfaceVariant
+    val fg = if (severe) MaterialTheme.colorScheme.onErrorContainer else MaterialTheme.colorScheme.onSurfaceVariant
     Row(
-        Modifier.fillMaxWidth().background(MaterialTheme.colorScheme.errorContainer).padding(horizontal = 16.dp, vertical = 8.dp),
+        Modifier.fillMaxWidth().background(bg).padding(horizontal = 16.dp, vertical = 8.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Text(
-            "Media volume is ${(vm.mediaVolume * 100).roundToInt()}%. Raise it to 70% or more before sending.",
-            color = MaterialTheme.colorScheme.onErrorContainer,
+            if (severe) "Media volume is ${(vm.mediaVolume * 100).roundToInt()}%. Raise it before sending; every 6 dB doubles the range."
+            else "Media volume is ${(vm.mediaVolume * 100).roundToInt()}%. Range is best at 100%.",
+            color = fg,
             style = MaterialTheme.typography.bodySmall,
             modifier = Modifier.weight(1f),
         )

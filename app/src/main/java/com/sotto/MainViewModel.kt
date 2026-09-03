@@ -4,6 +4,7 @@ import android.app.Application
 import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
+import android.util.Log
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
@@ -167,6 +168,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app), SoundLink.Callbac
     override fun onMessage(payload: ByteArray, protocolId: Int) {
         main.post {
             val text = String(payload, Charsets.UTF_8)
+            Log.i(TAG, "rx ${Modem.protocolName(protocolId)} ${payload.size} B: $text")
             trackBurst(text)
             addLog(LogEntry.Kind.RX, text, protocolId, payload.size)
         }
@@ -220,11 +222,13 @@ class MainViewModel(app: Application) : AndroidViewModel(app), SoundLink.Callbac
         if (burstSeen.add(seq)) burstReceived++
         burstLastSeq = seq
         burstLastAt = now
+        Log.i(TAG, "burst seq $seq: received $burstReceived / $burstExpected")
     }
 
     companion object {
+        private const val TAG = "Sotto"
         const val MAX_BYTES = 100
-        const val DEFAULT_TX_VOLUME = 90
+        const val DEFAULT_TX_VOLUME = 100
         const val BURST_COUNT = 10
         const val BURST_GAP_MS = 2000L
         const val BURST_PAYLOAD_BYTES = 20
