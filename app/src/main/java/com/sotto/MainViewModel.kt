@@ -232,7 +232,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app), SoundLink.Callbac
         const val BURST_COUNT = 10
         const val BURST_GAP_MS = 2000L
         const val BURST_PAYLOAD_BYTES = 20
-        private const val BURST_NEW_AFTER_MS = 20_000L
+        private const val BURST_NEW_AFTER_MS = 60_000L
         private const val MAX_LOG = 200
         private val BURST_REGEX = Regex("^TB(\\d\\d)/(\\d\\d):")
 

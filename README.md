@@ -18,7 +18,7 @@ next to it so the two can be compared on real phones with the built-in test burs
 
 | | |
 |---|---|
-| **Carrier** | one tone at a time, 2.1–8.0 kHz audible or 15–18 kHz ultrasound |
+| **Carrier** | one tone at a time, 2.1–8.0 kHz audible or 18–19.5 kHz ultrasound |
 | **Payload** | up to 100 bytes of UTF-8 per message |
 | **Speed** | 5 bytes in 0.62 s, 20 bytes in 1.22 s, 100 bytes in 4.1 s |
 | **Integrity** | Reed–Solomon parity and a CRC-16. A message decodes intact or not at all |
@@ -115,7 +115,7 @@ breaks it even without noise, which is why the app caps ggwave's amplitude at 25
 |---|---|---|---|---|
 | Sotto Fast | 1.22 s | 4.1 s | 32 KB | 2.9 ms per s of audio |
 | Sotto Robust | 2.43 s | 8.1 s | 48 KB | 3.1 ms |
-| Sotto Ultrasound | 2.82 s | 9.6 s | 40 KB | 3.0 ms |
+| Sotto Ultrasound | 4.4 s | 14.7 s | 40 KB | 3.0 ms |
 | ggwave Fast | 2.09 s | 6.8 s | 8.2 MB | 0.6 ms idle, more while analysing |
 | ggwave Fastest | 1.39 s | 3.8 s | 8.2 MB | |
 
@@ -131,7 +131,7 @@ one. The log tells you which protocol each message arrived on.
 |---|---|---|---|---|
 | **Sotto Fast** (default) | 2.1–8.0 kHz | 21 ms | 1.22 s | most of the time |
 | Sotto Robust | 2.1–8.0 kHz, tones 47 Hz apart | 43 ms | 2.43 s | far apart, loud room, or someone is walking |
-| Sotto Ultrasound | 15–18 kHz | 43 ms, 5 bits | 2.82 s | it must be silent to adults; needs hardware that reaches 18 kHz |
+| Sotto Ultrasound | 18–19.5 kHz, 16 tones, rate-½ parity | 43 ms, 4 bits | 4.4 s | it must be silent to adults. Band tuned on one phone pair; see below |
 | ggwave Normal / Fast / Fastest | 1.8–6.2 kHz | 192 / 128 / 64 ms chunks | 2.8 / 2.1 / 1.4 s | comparison, and talking to other ggwave software |
 | ggwave Ultrasound ×3 | 15–19 kHz | as above | 2.8 / 2.1 / 1.4 s | same, above hearing |
 | ggwave Dual-tone ×3 | about 1–3 kHz | | 6.6 / 4.7 / 2.7 s | tiny speakers |
@@ -160,7 +160,7 @@ No toolchain needed to try it: the [latest release](https://github.com/retrocode
 carries a debug-signed APK. Put it on both phones and open it, or from a computer:
 
 ```sh
-adb install -r sotto-v0.2-debug.apk
+adb install -r sotto-v0.6-debug.apk
 ```
 
 ## Build
@@ -195,7 +195,7 @@ the artwork tools build with plain `g++`; the commands are in their headers.
    and why it was dropped if it was.
 
 Things that hurt: a case over the mic, a Bluetooth speaker or headset stealing the output on
-the sending phone, and ultrasound on hardware that rolls off before 18 kHz.
+the sending phone, and ultrasound on hardware that rolls off before 19 kHz.
 
 ## Under the hood
 
@@ -215,12 +215,37 @@ the sending phone, and ultrasound on hardware that rolls off before 18 kHz.
 - **The artwork is data.** `tools/dumpwave.cpp` writes the waveform a modem generates for a
   message; `tools/hero.py` draws it as run-length merged SVG rectangles.
 
+### On real phones
+
+Two phones, one a Samsung Galaxy A21s receiving over adb, ultrasound only so far, 20-byte
+bursts of ten. Each row is one change, tested at the same spots. Tone level is the mean
+energy of the winning tone at the receiver's microphone; the noise floor per bin sat at
+−88 to −103 dBFS throughout.
+
+| build | change | 25 cm | ~1 m | ~2 m | off sight, one wall bounce |
+|---|---|---|---|---|---|
+| v0.2 | as benchmarked, 15–18 kHz | 10/10, −55 dBFS | 9/10, −65 dBFS | | |
+| v0.3 | likelihood header | | 10/10 | 8/10, −73 dBFS | |
+| v0.4 | band moved to 16.5–19.5 kHz | | 9/10 | 9/10, **−67 dBFS** | |
+| v0.5 | rate-½ parity | | | 10/10 | 5/10, −84 dBFS |
+| v0.6 | 16 tones on 18–19.5 kHz | | | | **7/10**, −79 dBFS |
+
+What the log taught, in order: the one v0.2 loss was a header whose timing slipped, not a
+weak signal; these phones are 16 dB louder at 18 kHz than at 15 kHz, so moving the band up
+was worth 6 dB, a full doubling of range; the losses that remained happened at 21–26 dB of
+SNR, because at 2 cm wavelengths a few tones per frame fall into narrow fades, so parity
+went to rate ½; and off sight, with everything arriving by reflection, the pair's edge is a
+mean SNR of about 16–18 dB. In this flat the line-of-sight limit was never reached: at the
+far end of the longest room the tone level was the same as at 2 m, which is the room's
+reverberant field taking over.
+
 ## Status
 
-v0.3. First contact on real hardware (two phones, Sotto Ultrasound): 10 of 10 at 25 cm with
-30 dB of SNR, 9 of 10 at about a metre with 25 dB. The one miss was a header lost to a
-timing slip, which is what the likelihood header now fixes. More distances, the audible
-modes and the ggwave comparison on the same phones are next.
+v0.6. The ultrasound mode has been tuned on real phones as above. The audible modes and the
+ggwave comparison on the same phones are next; one accidental Sotto Fast frame at close
+range failed parity at 30 dB SNR, which suggests Fast's 21 ms symbols suffer more from a
+real room's reverb than the simulator predicts, and that Robust may deserve to be the
+default.
 
 ## Layout
 
