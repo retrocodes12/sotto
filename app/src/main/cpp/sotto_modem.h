@@ -31,6 +31,8 @@ struct Params {
                             // narrow fades, the whole frame (64 max)
     int          channels;  // tones played at once, each in its own pair of sets; 1 for range,
                             // more for throughput at short range (amplitude is shared)
+    int          syncWins;  // sync tones (of four) that must win their set outright: 3 in quiet
+                            // bands, 4 where speech and music live and false syncs are cheap
 };
 
 int            protocolCount();

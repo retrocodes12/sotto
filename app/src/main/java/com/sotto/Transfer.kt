@@ -91,6 +91,7 @@ object Transfer {
         var lastAt = 0L
         var complete = false
         var logId = 0L
+        var replyAttempt = 0
         val received: Int get() = parts.count { it != null }
         val missing: List<Int> get() = parts.indices.filter { parts[it] == null }
     }

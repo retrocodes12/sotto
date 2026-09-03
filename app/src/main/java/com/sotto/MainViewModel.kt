@@ -223,13 +223,31 @@ class MainViewModel(app: Application) : AndroidViewModel(app), SoundLink.Callbac
             if (x.received == x.total) finishIncoming(x, protocolId)
         }
         if (f is Transfer.Frame.End) {
-            // give the sender's decoder time to come back before answering
-            val reply = if (x.complete) Transfer.doneFrame(x.id) else Transfer.reqFrame(x.id, x.missing)
-            val pid = protocolId
-            val vol = effectiveVolumeFor(pid)
-            link.post { SystemClock.sleep(REPLY_DELAY_MS); link.transmit(reply, pid, vol) }
             Log.i(TAG, "transfer ${x.id}: END received, ${if (x.complete) "sending DONE" else "requesting ${x.missing.size} chunks"}")
+            x.replyAttempt = 0
+            sendReply(x, protocolId)
         }
+    }
+
+    /**
+     * Answers the sender after its END: DONE, or the missing list. Gives the sender's
+     * decoder time to come back first, then, if nothing arrives for a while, repeats the
+     * request a couple of times in case the sender missed it.
+     */
+    private fun sendReply(x: Transfer.Incoming, protocolId: Int) {
+        val reply = if (x.complete) Transfer.doneFrame(x.id) else Transfer.reqFrame(x.id, x.missing)
+        val vol = effectiveVolumeFor(protocolId)
+        val attempt = x.replyAttempt
+        val stampBefore = x.lastAt
+        link.post { SystemClock.sleep(REPLY_DELAY_MS); link.transmit(reply, protocolId, vol) }
+        if (x.complete || attempt >= MAX_REPLY_ATTEMPTS - 1) return
+        main.postDelayed({
+            if (!x.complete && x.lastAt == stampBefore) {   // nothing new arrived since the request
+                x.replyAttempt = attempt + 1
+                Log.i(TAG, "transfer ${x.id}: no resend heard, repeating the request (attempt ${attempt + 2})")
+                sendReply(x, protocolId)
+            }
+        }, REPLY_RETRY_MS)
     }
 
     private fun finishIncoming(x: Transfer.Incoming, protocolId: Int) {
@@ -310,13 +328,24 @@ class MainViewModel(app: Application) : AndroidViewModel(app), SoundLink.Callbac
                     val n = sent
                     main.post { updateLog(logId) { it.with(progress = "$n / ${chunks.size} chunks" + if (round > 0) ", round ${round + 1}" else "") } }
                 }
-                link.transmit(Transfer.endFrame(id, chunks.size), pid, vol)
-                val reply = control.poll(REPLY_TIMEOUT_MS, TimeUnit.MILLISECONDS)
-                when {
-                    reply == null -> { outcome = "no reply from the receiver after round ${round + 1}"; break }
-                    reply.id != id -> continue
-                    reply is Transfer.Frame.Done -> { outcome = "delivered"; break }
-                    reply is Transfer.Frame.Req -> { pass = reply.missing.filter { it < chunks.size }; round++; if (pass.isEmpty()) { outcome = "delivered"; break } }
+                var reply: Transfer.Frame? = null
+                for (attempt in 0 until END_ATTEMPTS) {   // repeat END if no reply is heard
+                    link.transmit(Transfer.endFrame(id, chunks.size), pid, vol)
+                    reply = control.poll(REPLY_TIMEOUT_MS, TimeUnit.MILLISECONDS)
+                    while (reply != null && reply.id != id) reply = control.poll(REPLY_TIMEOUT_MS, TimeUnit.MILLISECONDS)
+                    if (reply != null) break
+                    Log.i(TAG, "transfer $id: no reply to END, attempt ${attempt + 1}")
+                }
+                when (reply) {
+                    null -> { outcome = "no reply from the receiver after round ${round + 1}"; break }
+                    is Transfer.Frame.Done -> { outcome = "delivered"; break }
+                    is Transfer.Frame.Req -> {
+                        pass = reply.missing.filter { it < chunks.size }
+                        round++
+                        if (pass.isEmpty()) { outcome = "delivered"; break }
+                        SystemClock.sleep(REPLY_DELAY_MS)   // let the receiver's post-transmit mute lapse
+                    }
+                    else -> {}
                 }
                 if (round >= MAX_ROUNDS) outcome = "gave up after $MAX_ROUNDS rounds"
             }
@@ -401,8 +430,11 @@ class MainViewModel(app: Application) : AndroidViewModel(app), SoundLink.Callbac
         private const val PHOTO_MAX_SIDE = 160
         private const val PHOTO_QUALITY = 45
         private const val PHOTO_MAX_BYTES = 8_000
-        private const val REPLY_DELAY_MS = 600L
-        private const val REPLY_TIMEOUT_MS = 12_000L
+        private const val REPLY_DELAY_MS = 700L
+        private const val REPLY_TIMEOUT_MS = 9_000L
+        private const val REPLY_RETRY_MS = 4_000L
+        private const val MAX_REPLY_ATTEMPTS = 3
+        private const val END_ATTEMPTS = 2
         private const val MAX_ROUNDS = 6
         private const val MAX_LOG = 200
         private val BURST_REGEX = Regex("^TB(\\d\\d)/(\\d\\d):")

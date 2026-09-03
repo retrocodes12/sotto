@@ -30,15 +30,15 @@ constexpr float kTailAlpha     = SOTTO_TAIL_ALPHA;  // fraction of the previous 
 constexpr int   kSyncSeed[kSyncSymbols] = { 5, 42, 21, 58 };
 
 const Params kProtocols[] = {
-    // id   name               N     first step bits parity ch   band at 48 kHz
-    { 100, "Sotto Fast",       1024,  44,   1,   6,  32,   1 },  // 2.06-8.02 kHz, 21 ms symbols
-    { 101, "Sotto Robust",     2048,  88,   2,   6,  32,   1 },  // 2.06-8.04 kHz, 43 ms symbols
-    { 102, "Sotto Ultrasound", 2048, 768,   2,   4,  64,   1 },  // 18.0-19.5 kHz, 43 ms symbols, 16 tones. The
+    // id   name               N     first step bits parity ch sync  band at 48 kHz
+    { 100, "Sotto Fast",       1024,  44,   1,   6,  32,   1,  3 },  // 2.06-8.02 kHz, 21 ms symbols
+    { 101, "Sotto Robust",     2048,  88,   2,   6,  32,   1,  3 },  // 2.06-8.04 kHz, 43 ms symbols
+    { 102, "Sotto Ultrasound", 2048, 768,   2,   4,  64,   1,  3 },  // 18.0-19.5 kHz, 43 ms symbols, 16 tones. The
                                                                  // first test phones were 16 dB louder at 18 kHz
                                                                  // than at 15 kHz and flat 18-19.5, so the whole
                                                                  // band sits on that peak; 2 cm wavelengths fade
                                                                  // single tones, hence rate 1/2 parity
-    { 103, "Sotto Near",        512,  16,   1,   4,  32,   4 },  // 1.5-13.5 kHz, 10.7 ms symbols, four tones at
+    { 103, "Sotto Near",        512,  16,   1,   4,  32,   4,  4 },  // 1.5-13.5 kHz, 10.7 ms symbols, four tones at
                                                                  // once: 16 bits per symbol for photos at arm's
                                                                  // length, where SNR is plentiful
 };
@@ -312,7 +312,7 @@ bool Decoder::syncScore(int64_t hop, float & score) const {
         if (snr < kSyncSnr) return false;
         score += std::log(snr);
     }
-    return wins >= kSyncSymbols - 1 && score >= kSyncScore;
+    return wins >= m_p.syncWins && score >= kSyncScore;
 }
 
 void Decoder::onHop(const OnMessage & onMessage) {
