@@ -18,7 +18,7 @@ next to it so the two can be compared on real phones with the built-in test burs
 
 | | |
 |---|---|
-| **Carrier** | one tone at a time, 2.1–8.0 kHz audible or 18–19.5 kHz ultrasound |
+| **Carrier** | one tone at a time, 2.1–8.0 kHz audible or 18–19.5 kHz ultrasound; Bluetooth LE when a phone is in radio range |
 | **Payload** | up to 100 bytes of UTF-8 per message |
 | **Speed** | 5 bytes in 0.62 s, 20 bytes in 1.22 s, 100 bytes in 4.1 s |
 | **Integrity** | Reed–Solomon parity and a CRC-16. A message decodes intact or not at all |
@@ -166,6 +166,13 @@ payloads.
   someone whose key is already held is never swapped in silently: the chat shows both
   fingerprints and asks, since anyone in earshot can play a KEY frame. Replayed private
   messages are dropped by a per-peer counter.
+- **Bluetooth, beside the sound.** The same frames also travel over Bluetooth LE when a phone is
+  in radio range: further, faster, and without spending airtime. Every phone advertises its tag
+  and scans for others, so there is still nothing to pair and no server. A frame the radio fails
+  to deliver is played through the speaker instead, so nothing depends on it, and sound carries
+  everything the moment no phone is in Bluetooth range. Share cards and the reach test stay on
+  sound on purpose: a card is the hold-the-phones-together gesture, and the reach test measures
+  the room. Settings can switch the radio off entirely.
 - **Who's in reach.** The status line under the wordmark says who is nearby: phones announce
   themselves with a hello when opened, chirp three bytes when they have been quiet for over a
   minute, and anyone heard directly in the last three minutes counts. Phones heard only through

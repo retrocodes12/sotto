@@ -56,11 +56,17 @@ fun SottoApp() {
         if (!ok) deniedOnce = true
     }
 
-    val notifLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { }
-    LaunchedEffect(granted, vm.identity.name) {
-        if (granted && vm.identity.name.isNotEmpty() && Build.VERSION.SDK_INT >= 33 &&
+    // Notifications and Bluetooth go in one request: two launchers firing in the same frame
+    // race each other and the system drops one of the dialogs.
+    val extrasLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { vm.startBle() }
+    LaunchedEffect(granted, vm.identity.name, vm.bluetoothOn) {
+        if (!granted || vm.identity.name.isEmpty()) return@LaunchedEffect
+        val want = ArrayList<String>()
+        if (Build.VERSION.SDK_INT >= 33 &&
             ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
-        ) notifLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+        ) want += Manifest.permission.POST_NOTIFICATIONS
+        want += vm.blePermissionsNeeded()
+        if (want.isEmpty()) vm.startBle() else extrasLauncher.launch(want.toTypedArray())
     }
 
     LifecycleResumeEffect(Unit) {

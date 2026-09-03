@@ -1,6 +1,9 @@
 package com.sotto
 
+import android.Manifest
 import android.content.Context
+import android.content.pm.PackageManager
+import androidx.core.content.ContextCompat
 import android.media.AudioAttributes
 import android.media.AudioFormat
 import android.media.AudioManager
@@ -29,7 +32,7 @@ import kotlin.math.sqrt
  *
  * All callbacks arrive on the capture or transmit thread, never the main thread.
  */
-class SoundLink(context: Context, private val callbacks: Callbacks) {
+class SoundLink(private val context: Context, private val callbacks: Callbacks) {
 
     interface Callbacks {
         /** Roughly 12 times a second while listening. [rms] is linear, 0..1. */
@@ -209,6 +212,12 @@ class SoundLink(context: Context, private val callbacks: Callbacks) {
 
     /** Tries UNPROCESSED (when the device advertises it), then VOICE_RECOGNITION, then MIC. */
     private fun openRecorder(): Pair<AudioRecord, String>? {
+        // The permission can be taken away while the app runs; capture then stops cleanly
+        // instead of throwing on the capture thread.
+        if (ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
+            Log.w(TAG, "microphone permission is gone")
+            return null
+        }
         val minBuf = AudioRecord.getMinBufferSize(
             SAMPLE_RATE, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT
         )

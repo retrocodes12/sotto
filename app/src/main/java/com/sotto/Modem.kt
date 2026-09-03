@@ -88,8 +88,10 @@ class Modem(sampleRate: Int, samplesPerFrame: Int = SAMPLES_PER_FRAME) : AutoClo
             sotto + ggwave
         }
 
-        fun protocolName(id: Int): String =
-            protocols.firstOrNull { it.id == id }?.name ?: "protocol $id"
+        fun protocolName(id: Int): String = when {
+            id == BleLink.PROTOCOL_ID -> "Bluetooth"
+            else -> protocols.firstOrNull { it.id == id }?.name ?: "protocol $id"
+        }
 
         /** Seconds of audio for [bytes] on a Sotto protocol, or null for ggwave ones. */
         fun airtime(protocolId: Int, bytes: Int): Float? =

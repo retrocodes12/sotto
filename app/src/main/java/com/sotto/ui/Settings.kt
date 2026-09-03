@@ -115,6 +115,21 @@ fun SettingsSheet(vm: MainViewModel, onDismiss: () -> Unit) {
             }
             Rule()
 
+            if (vm.bluetoothAvailable) {
+                SwitchRow(
+                    "Use Bluetooth too",
+                    when {
+                        !vm.bluetoothOn -> "Off. Everything goes by sound."
+                        vm.bleNote != null -> vm.bleNote!!
+                        vm.blePeers > 0 -> "${vm.blePeers} ${if (vm.blePeers == 1) "phone" else "phones"} in range. Messages and photos go by radio, which is faster and reaches further; sound takes over when nobody is in Bluetooth range."
+                        vm.bleRunning -> "On, nobody in range yet. Sound is carrying everything meanwhile."
+                        else -> "On. Waiting for Bluetooth."
+                    },
+                    vm.bluetoothOn,
+                ) { vm.setBluetooth(it) }
+                Rule()
+            }
+
             SwitchRow(
                 "Repeat for others",
                 if (vm.relayForOthers) "Messages this phone hears are played again once, so phones out of the sender's reach still get them." else "This phone keeps what it hears to itself.",

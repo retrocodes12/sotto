@@ -59,7 +59,7 @@ class LogEntry(
     fun with(
         text: String = this.text, image: Bitmap? = this.image, progress: String? = this.progress,
         bytes: Int = this.bytes, fraction: Float? = this.fraction, senderId: Int? = this.senderId, via: Int? = this.via,
-        delivered: Boolean = this.delivered, imageBytes: ByteArray? = this.imageBytes,
+        delivered: Boolean = this.delivered, imageBytes: ByteArray? = this.imageBytes, protocol: String = this.protocol,
     ) = LogEntry(id, time, kind, text, protocol, bytes, image, progress, fraction, senderId, via, peer, seq, delivered, imageBytes, card)
 }
 
@@ -69,6 +69,80 @@ class MainViewModel(app: Application) : AndroidViewModel(app), SoundLink.Callbac
     private val main = Handler(Looper.getMainLooper())
     private val link = SoundLink(app, this)
     val identity = IdentityStore(app)
+
+    /**
+     * The radio, beside the speaker. It carries exactly the same frames, so names, private
+     * chats, receipts, relaying and photo transfers work over it without knowing it exists.
+     * Everything falls back to sound the moment no phone is in Bluetooth range.
+     */
+    private val ble = BleLink(app, object : BleLink.Callbacks {
+        override fun onBleFrame(payload: ByteArray) = onMessage(payload, BleLink.PROTOCOL_ID, 0f)
+        override fun onBlePresence(id: Int, rssi: Int) {
+            main.post { if (id != identity.id) noteSender(id, BleLink.PROTOCOL_ID) }
+        }
+        override fun onBleState(running: Boolean, peers: Int, note: String?) {
+            main.post { bleRunning = running; blePeers = peers; bleNote = note }
+        }
+    })
+
+    /** The user's choice. Off keeps every frame on the speaker. */
+    var bluetoothOn by mutableStateOf(true)
+        private set
+    var bleRunning by mutableStateOf(false)
+        private set
+    var blePeers by mutableIntStateOf(0)
+        private set
+    var bleNote by mutableStateOf<String?>(null)
+        private set
+
+    val bluetoothAvailable: Boolean get() = ble.hasHardware()
+
+    /** True when the radio would actually carry a frame right now. */
+    private fun bleReady(): Boolean = bluetoothOn && ble.canSend()
+
+    fun setBluetooth(on: Boolean) {
+        bluetoothOn = on
+        if (on) startBle() else { ble.stop(); blePeers = 0 }
+    }
+
+    /** Called once the permissions exist. Safe to call again. */
+    fun startBle() {
+        if (!bluetoothOn || !ble.hasHardware()) return
+        if (ble.missingPermissions().isNotEmpty()) { bleNote = "Bluetooth permission not granted"; return }
+        ble.start(identity.id)
+    }
+
+    fun blePermissionsNeeded(): List<String> = if (bluetoothOn && ble.hasHardware()) ble.missingPermissions() else emptyList()
+
+    /**
+     * One frame out on the best transport. The radio takes it immediately when a phone is in
+     * range; otherwise it joins the sound thread's queue with the pauses that channel needs.
+     */
+    private fun dispatch(frame: ByteArray, protocolId: Int, volume: Int, delayMs: Long = 0L, quiet: Boolean = true) {
+        if (bleReady() && ble.send(frame) { ok -> if (!ok) overTheSpeaker(frame, protocolId, volume, delayMs, quiet) }) return
+        overTheSpeaker(frame, protocolId, volume, delayMs, quiet)
+    }
+
+    /** The speaker path, used directly and as the radio's fallback. */
+    private fun overTheSpeaker(frame: ByteArray, protocolId: Int, volume: Int, delayMs: Long = 0L, quiet: Boolean = true) {
+        val pid = overSpeaker(protocolId)
+        link.post {
+            if (delayMs > 0) SystemClock.sleep(delayMs)
+            if (quiet) link.waitUntilQuiet(RELAY_QUIET_WAIT_MS)
+            link.transmit(frame, pid, overSpeakerVolume(pid, volume))
+        }
+    }
+
+    /**
+     * A reply to something heard over the radio carries the radio's protocol id, which the
+     * modem knows nothing about. If the radio is gone by the time we answer, the frame still
+     * has to leave through the speaker, so it needs a real protocol.
+     */
+    private fun overSpeaker(protocolId: Int): Int =
+        if (protocolId == BleLink.PROTOCOL_ID) textProtocolId else protocolId
+
+    private fun overSpeakerVolume(pid: Int, volume: Int): Int =
+        if (pid >= Modem.SOTTO_ID_BASE) volume else minOf(volume, Modem.GGWAVE_MAX_VOLUME)
     private val helloSentAt = HashMap<Int, Long>()
 
     /** Repeat what this phone hears so phones out of earshot of the sender still get it. */
@@ -82,7 +156,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app), SoundLink.Callbac
         listenInBackground = on
         if (!on) {
             ListenService.stop(getApplication())
-            if (!inForeground) link.stopListening()
+            if (!inForeground) { link.stopListening(); ble.stop() }
         } else if (wantListening) {
             ListenService.start(getApplication())
         }
@@ -97,6 +171,8 @@ class MainViewModel(app: Application) : AndroidViewModel(app), SoundLink.Callbac
         val pid = Modem.NEAR_PROTOCOL_ID
         val vol = effectiveVolumeFor(pid)
         status = null
+        // Deliberately not over the radio: a card is the "hold the phones together" gesture, and
+        // a Wi-Fi password should not carry to every phone within thirty metres.
         link.post {
             val ok = link.transmit(frame, pid, vol)
             main.post { if (ok) addLog(LogEntry.Kind.TX, cardTitle(kind, clean), pid, frame.size, card = LogEntry.Card(kind, clean)) }
@@ -200,7 +276,10 @@ class MainViewModel(app: Application) : AndroidViewModel(app), SoundLink.Callbac
     /** Ticks every few seconds so "nearby" counts and "x min ago" stay current on screen. */
     var clockTick by mutableIntStateOf(0)
         private set
-    val nearby: List<Int> get() { clockTick; return identity.nearby(PRESENT_FOR_MS) }
+    val nearby: List<Int> get() { clockTick; return (identity.nearby(PRESENT_FOR_MS) + ble.nearbyIds(PRESENT_FOR_MS)).distinct() }
+
+    /** Ids the radio can see right now, so the UI can say how someone is reachable. */
+    val bleNearby: List<Int> get() { clockTick; return if (bluetoothOn) ble.nearbyIds(PRESENT_FOR_MS) else emptyList() }
     val farther: List<Int> get() { clockTick; return identity.farther(PRESENT_FOR_MS) }
     private var announced = false
     private val presence = object : Runnable {
@@ -310,6 +389,8 @@ class MainViewModel(app: Application) : AndroidViewModel(app), SoundLink.Callbac
     private val incoming = HashMap<Int, Transfer.Incoming>()
     private val control = LinkedBlockingQueue<Transfer.Frame>()
     private var nextLogId = 1L
+    /** The tile for the message the radio is currently carrying, so its label can be corrected. */
+    private var radioLogId = 0L
 
     val draftBytes: Int
         get() = draft.toByteArray(Charsets.UTF_8).size
@@ -360,18 +441,21 @@ class MainViewModel(app: Application) : AndroidViewModel(app), SoundLink.Callbac
         val frame = Wire.hello(identity.id, identity.name)
         val pid = textProtocolId
         val vol = effectiveVolumeFor(pid)
-        link.post { link.waitUntilQuiet(RELAY_QUIET_WAIT_MS); link.transmit(frame, pid, vol) }
+        dispatch(frame, pid, vol)
     }
 
     /** A three-byte "here" when this phone has been quiet for a while, so it stays counted. */
     private fun maybeChirp() {
         if (!inForeground || !wantListening || busy || identity.name.isEmpty()) return
+        // The radio advertises us continuously, so a chirp is only wasted airtime when every
+        // phone we know of can see us that way.
+        if (bleReady() && identity.nearby(PRESENT_FOR_MS).all { it in ble.nearbyIds(PRESENT_FOR_MS) }) return
         val idle = SystemClock.elapsedRealtime() - link.lastTransmitAt
         if (idle < CHIRP_AFTER_IDLE_MS + Random.nextLong(0, CHIRP_JITTER_MS)) return
         val frame = Wire.here(identity.id)
         val pid = textProtocolId
         val vol = effectiveVolumeFor(pid)
-        link.post { link.waitUntilQuiet(RELAY_QUIET_WAIT_MS); link.transmit(frame, pid, vol) }
+        dispatch(frame, pid, vol)
     }
 
     /** One line for the header. */
@@ -388,17 +472,19 @@ class MainViewModel(app: Application) : AndroidViewModel(app), SoundLink.Callbac
         } + presenceSuffix()
 
     private fun presenceSuffix(): String {
+        if (bleRunning && blePeers > 0 && nearby.isEmpty()) return " · Bluetooth"
         val n = nearby.size
         val f = farther.size
         if (n == 0 && f == 0) return ""
         val names = nearby.take(2).mapNotNull { identity.nameFor(it) }
         val who = if (n in 1..2 && names.size == n) names.joinToString(", ") else "$n nearby"
-        return " · " + who + (if (f > 0) " · $f farther" else "")
+        return " · " + who + (if (f > 0) " · $f farther" else "") + (if (bleRunning && blePeers > 0) " · Bluetooth" else "")
     }
 
     /** Android blocks background mic access anyway; stop cleanly and resume on return. */
     fun onForeground() {
         inForeground = true
+        startBle()
         if (wantListening && captureSource == null) link.startListening()
         if (SystemClock.elapsedRealtime() - lastUpdateCheck > UPDATE_CHECK_EVERY_MS) checkForUpdates(manual = false)
     }
@@ -446,7 +532,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app), SoundLink.Callbac
 
     fun onBackground() {
         inForeground = false
-        if (!listenInBackground) link.stopListening()
+        if (!listenInBackground) { link.stopListening(); ble.stop() }
     }
 
     /** Notifies about a message that arrived while the app was not on screen. */
@@ -485,6 +571,18 @@ class MainViewModel(app: Application) : AndroidViewModel(app), SoundLink.Callbac
         status = null
         sending = true
         draft = ""
+        val radioAttempt = bleReady() && ble.send(bytes) { ok ->
+            if (!ok) main.post {
+                Log.i(TAG, "Bluetooth did not carry it; falling back to the speaker")
+                updateLog(radioLogId) { it.with(protocol = Modem.protocolName(pid)) }
+                overTheSpeaker(bytes, pid, vol, quiet = false)
+            }
+        }
+        if (radioAttempt) {
+            sending = false
+            radioLogId = addLog(LogEntry.Kind.TX, text, BleLink.PROTOCOL_ID, bytes.size, peer = peer, seq = if (peer != null) seq else null)
+            return
+        }
         link.post {
             val ok = link.transmit(bytes, pid, vol)
             main.post {
@@ -588,16 +686,17 @@ class MainViewModel(app: Application) : AndroidViewModel(app), SoundLink.Callbac
                     if (m.from == identity.id) return@post
                     noteSender(m.from, protocolId)
                     val snr = lastSnrDb.toInt().coerceIn(0, 255)
+                    if (protocolId == BleLink.PROTOCOL_ID) return@post   // the reach test measures the room, not the radio
                     val frame = Wire.probeReply(identity.id, m.from, m.seq, snr)
                     val vol = effectiveVolumeFor(protocolId)
                     val wait = REPLY_DELAY_MS + Random.nextLong(0, 1500)
-                    link.post { SystemClock.sleep(wait); link.waitUntilQuiet(RELAY_QUIET_WAIT_MS); link.transmit(frame, protocolId, vol) }
+                    overTheSpeaker(frame, protocolId, vol, delayMs = wait)
                 }
                 is Wire.Parsed.ProbeReply -> {
                     if (m.from == identity.id || m.to != identity.id) return@post
                     noteSender(m.from, protocolId)
                     reach?.let { r ->
-                        if (m.seq !in r.seqs) return@let
+                        if (m.seq !in r.seqs || protocolId == BleLink.PROTOCOL_ID) return@let
                         val ours = lastSnrDb.toInt().coerceIn(0, 255)
                         r.heard[m.from] = (r.heard[m.from] ?: emptyList()) + listOf(m.snrDb, ours)
                         Log.i(TAG, "reach reply from ${IdentityStore.tagOf(m.from)}: they heard ${m.snrDb} dB, we hear $ours dB")
@@ -693,14 +792,14 @@ class MainViewModel(app: Application) : AndroidViewModel(app), SoundLink.Callbac
         val pid = protocolId
         val vol = effectiveVolumeFor(pid)
         val wait = REPLY_DELAY_MS + Random.nextLong(0, 900)
-        link.post { SystemClock.sleep(wait); link.transmit(frame, pid, vol) }
+        dispatch(frame, pid, vol, delayMs = wait, quiet = false)
     }
 
     /** "Got it": a seven-byte receipt to the sender of a private message, after a short pause. */
     private fun sendAck(to: Int, seq: Int, protocolId: Int) {
         val frame = Wire.ack(identity.id, to, seq, HOP_BUDGET)
         val vol = effectiveVolumeFor(protocolId)
-        link.post { SystemClock.sleep(REPLY_DELAY_MS + Random.nextLong(0, 400)); link.waitUntilQuiet(RELAY_QUIET_WAIT_MS); link.transmit(frame, protocolId, vol) }
+        dispatch(frame, protocolId, vol, delayMs = REPLY_DELAY_MS + Random.nextLong(0, 400))
     }
 
     /** Plays our public key for [peer], at most once a minute; they answer with theirs. */
@@ -712,7 +811,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app), SoundLink.Callbac
         val frame = Wire.key(identity.id, peer, identity.publicKey)
         val pid = textProtocolId
         val vol = effectiveVolumeFor(pid)
-        link.post { SystemClock.sleep(REPLY_DELAY_MS + Random.nextLong(0, 600)); link.waitUntilQuiet(RELAY_QUIET_WAIT_MS); link.transmit(frame, pid, vol) }
+        dispatch(frame, pid, vol, delayMs = REPLY_DELAY_MS + Random.nextLong(0, 600))
     }
 
     /** Settings: a new name is announced to everyone we know next time they speak. */
@@ -746,14 +845,16 @@ class MainViewModel(app: Application) : AndroidViewModel(app), SoundLink.Callbac
         val cancelled = AtomicBoolean(false)
         pendingRelays[key] = cancelled
         val wait = RELAY_MIN_WAIT_MS + Random.nextLong(0, RELAY_JITTER_MS)
-        val vol = effectiveVolumeFor(protocolId)
+        val vol = effectiveVolumeFor(overSpeaker(protocolId))
         link.post {
             SystemClock.sleep(wait)
             if (cancelled.get()) { Log.i(TAG, "relay suppressed, someone else repeated it"); return@post }
-            link.waitUntilQuiet(RELAY_QUIET_WAIT_MS)
+            if (!bleReady()) link.waitUntilQuiet(RELAY_QUIET_WAIT_MS)
             if (cancelled.get()) return@post
-            Log.i(TAG, "relaying ${frame.size} B on ${Modem.protocolName(protocolId)}")
-            link.transmit(frame, protocolId, vol)
+            Log.i(TAG, "relaying ${frame.size} B")
+            if (!(bleReady() && ble.send(frame) { ok -> if (!ok) overTheSpeaker(frame, protocolId, vol, quiet = false) })) {
+                link.transmit(frame, overSpeaker(protocolId), vol)
+            }
             main.post { pendingRelays.remove(key) }
         }
     }
@@ -765,7 +866,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app), SoundLink.Callbac
         val frame = Wire.hello(identity.id, identity.name)
         val pid = textProtocolId
         val vol = effectiveVolumeFor(pid)
-        link.post { link.transmit(frame, pid, vol) }
+        dispatch(frame, pid, vol, quiet = false)
         addLog(LogEntry.Kind.INFO, "You said hello as ${identity.name} ${identity.tag}", pid, 0)
     }
 
@@ -810,7 +911,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app), SoundLink.Callbac
         val vol = effectiveVolumeFor(protocolId)
         val attempt = x.replyAttempt
         val stampBefore = x.lastAt
-        link.post { SystemClock.sleep(REPLY_DELAY_MS); link.transmit(reply, protocolId, vol) }
+        dispatch(reply, protocolId, vol, delayMs = if (bleReady()) 0L else REPLY_DELAY_MS, quiet = false)
         if (x.complete || attempt >= MAX_REPLY_ATTEMPTS - 1) return
         main.postDelayed({
             if (!x.complete && x.lastAt == stampBefore) {   // nothing new arrived since the request
@@ -854,7 +955,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app), SoundLink.Callbac
         }
         // the sender may finish its pass later; DONE goes out when its END arrives, and once now
         val pid = protocolId
-        link.post { SystemClock.sleep(REPLY_DELAY_MS); link.transmit(Transfer.doneFrame(x.id), pid, effectiveVolumeFor(pid)) }
+        dispatch(Transfer.doneFrame(x.id), pid, effectiveVolumeFor(pid), delayMs = if (bleReady()) 0L else REPLY_DELAY_MS, quiet = false)
     }
 
     // ---- transfers: sending ------------------------------------------------------------
@@ -896,7 +997,8 @@ class MainViewModel(app: Application) : AndroidViewModel(app), SoundLink.Callbac
         val chunks = Transfer.chunks(id, kind, origin, msgSeq, hops, content)
         if (chunks == null) { status = "Too large to send (${content.size} B)"; return }
         val vol = effectiveVolumeFor(pid)
-        val perChunk = Modem.airtime(pid, Transfer.MAX_FRAME) ?: 3f
+        val overRadio = bleReady()
+        val perChunk = if (overRadio) 0.06f else (Modem.airtime(pid, Transfer.MAX_FRAME) ?: 3f)
         val forwarded = origin != identity.id
         val logId = addLog(if (forwarded) LogEntry.Kind.INFO else LogEntry.Kind.TX, if (forwarded) "Forwarding ${identity.nameFor(origin)}'s photo for others" else "", pid, content.size, image = preview,
             progress = "sending, about ${(chunks.size * (perChunk + 0.4f)).toInt()} s", fraction = 0f, imageBytes = if (forwarded) null else content)
@@ -911,29 +1013,39 @@ class MainViewModel(app: Application) : AndroidViewModel(app), SoundLink.Callbac
             var sent = 0
             var outcome = "no reply from the receiver"
             var round = 0
+            var heardOnRadio = false   // true once this transfer has had an answer back
             while (round < MAX_ROUNDS) {
                 for (seq in pass) {
-                    link.transmit(chunks[seq], pid, vol)
+                    val chunk = chunks[seq]
+                    if (!(bleReady() && ble.send(chunk) { ok -> if (!ok) overTheSpeaker(chunk, pid, vol, quiet = false) })) link.transmit(chunk, pid, vol)
                     sent++
                     val n = sent
                     main.post { updateLog(logId) { it.with(progress = "sending, $n of ${chunks.size}" + if (round > 0) ", round ${round + 1}" else "", fraction = minOf(1f, n.toFloat() / chunks.size)) } }
                 }
                 var reply: Transfer.Frame? = null
                 for (attempt in 0 until END_ATTEMPTS) {   // repeat END if no reply is heard
-                    link.transmit(Transfer.endFrame(id, chunks.size), pid, vol)
-                    reply = control.poll(REPLY_TIMEOUT_MS, TimeUnit.MILLISECONDS)
-                    while (reply != null && reply.id != id) reply = control.poll(REPLY_TIMEOUT_MS, TimeUnit.MILLISECONDS)
+                    // read each time: the radio may come or go in the middle of a photo
+                    val onRadio = bleReady()
+                    // A cold Bluetooth connection takes a few seconds to open, so the first
+                    // attempt of a transfer waits as long as the sound path would.
+                    val timeout = if (!onRadio) REPLY_TIMEOUT_MS
+                        else if (heardOnRadio) BLE_REPLY_TIMEOUT_MS else REPLY_TIMEOUT_MS
+                    val endFrame = Transfer.endFrame(id, chunks.size)
+                    if (!(onRadio && ble.send(endFrame) { ok -> if (!ok) overTheSpeaker(endFrame, pid, vol, quiet = false) })) link.transmit(endFrame, pid, vol)
+                    reply = control.poll(timeout, TimeUnit.MILLISECONDS)
+                    while (reply != null && reply.id != id) reply = control.poll(timeout, TimeUnit.MILLISECONDS)
                     if (reply != null) break
                     Log.i(TAG, "transfer $id: no reply to END, attempt ${attempt + 1}")
                 }
                 when (reply) {
                     null -> { outcome = "no reply from the receiver after round ${round + 1}"; break }
-                    is Transfer.Frame.Done -> { outcome = "delivered"; break }
+                    is Transfer.Frame.Done -> { heardOnRadio = true; outcome = "delivered"; break }
                     is Transfer.Frame.Req -> {
+                        heardOnRadio = true
                         pass = reply.missing.filter { it < chunks.size }
                         round++
                         if (pass.isEmpty()) { outcome = "delivered"; break }
-                        SystemClock.sleep(REPLY_DELAY_MS)   // let the receiver's post-transmit mute lapse
+                        if (!bleReady()) SystemClock.sleep(REPLY_DELAY_MS)   // let the receiver's post-transmit mute lapse
                     }
                     else -> {}
                 }
@@ -973,6 +1085,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app), SoundLink.Callbac
 
     override fun onCleared() {
         cancelBurst()
+        ble.close()
         link.close()
     }
 
@@ -1037,6 +1150,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app), SoundLink.Callbac
         private const val INCOMING_ABANDON_MS = 120_000L
         private const val REPLY_DELAY_MS = 700L
         private const val REPLY_TIMEOUT_MS = 9_000L
+        private const val BLE_REPLY_TIMEOUT_MS = 2_500L
         private const val REPLY_RETRY_MS = 4_000L
         private const val MAX_REPLY_ATTEMPTS = 3
         private const val END_ATTEMPTS = 2
