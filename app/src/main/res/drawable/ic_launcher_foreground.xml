@@ -5,9 +5,9 @@
     android:viewportWidth="108"
     android:viewportHeight="108">
     <!-- five sound bars -->
-    <path android:fillColor="#F2E9D8" android:pathData="M30,48 h6 v12 h-6 z" />
-    <path android:fillColor="#F2E9D8" android:pathData="M40,38 h6 v32 h-6 z" />
-    <path android:fillColor="#F2E9D8" android:pathData="M50,28 h6 v52 h-6 z" />
-    <path android:fillColor="#F2E9D8" android:pathData="M60,36 h6 v36 h-6 z" />
-    <path android:fillColor="#F2E9D8" android:pathData="M70,44 h6 v20 h-6 z" />
+    <path android:fillColor="#FFD23F" android:pathData="M30,48 h6 v12 h-6 z" />
+    <path android:fillColor="#FFD23F" android:pathData="M40,38 h6 v32 h-6 z" />
+    <path android:fillColor="#FFD23F" android:pathData="M50,28 h6 v52 h-6 z" />
+    <path android:fillColor="#FFD23F" android:pathData="M60,36 h6 v36 h-6 z" />
+    <path android:fillColor="#FFD23F" android:pathData="M70,44 h6 v20 h-6 z" />
 </vector>

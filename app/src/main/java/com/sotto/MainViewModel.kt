@@ -32,11 +32,14 @@ class LogEntry(
     val bytes: Int,
     val image: Bitmap? = null,
     val progress: String? = null,
+    val fraction: Float? = null,
 ) {
     enum class Kind { RX, TX, INFO }
 
-    fun with(text: String = this.text, image: Bitmap? = this.image, progress: String? = this.progress, bytes: Int = this.bytes) =
-        LogEntry(id, time, kind, text, protocol, bytes, image, progress)
+    fun with(
+        text: String = this.text, image: Bitmap? = this.image, progress: String? = this.progress,
+        bytes: Int = this.bytes, fraction: Float? = this.fraction,
+    ) = LogEntry(id, time, kind, text, protocol, bytes, image, progress, fraction)
 }
 
 /** Owns the [SoundLink] and exposes everything the UI shows as Compose state. */
@@ -56,7 +59,12 @@ class MainViewModel(app: Application) : AndroidViewModel(app), SoundLink.Callbac
     var transmitting by mutableStateOf(false)
         private set
     var protocolId by mutableIntStateOf(Modem.DEFAULT_PROTOCOL_ID)
+    /** Auto: Fast for text, Near for photos. Off: whatever [protocolId] says, for everything. */
+    var autoProtocol by mutableStateOf(true)
     var txVolume by mutableIntStateOf(DEFAULT_TX_VOLUME)
+
+    val textProtocolId: Int get() = if (autoProtocol) Modem.DEFAULT_PROTOCOL_ID else protocolId
+    val photoProtocolId: Int get() = if (autoProtocol) Modem.NEAR_PROTOCOL_ID else protocolId
     var draft by mutableStateOf("")
     var mediaVolume by mutableFloatStateOf(1f)
         private set
@@ -107,6 +115,24 @@ class MainViewModel(app: Application) : AndroidViewModel(app), SoundLink.Callbac
         if (on) link.startListening() else link.stopListening()
     }
 
+    /** The conversation screen calls this once the mic permission exists: listening is the default. */
+    fun ensureListening() {
+        if (!wantListening && captureSource == null) setListening(true)
+    }
+
+    /** One line for the header. */
+    val statusLine: String
+        get() = when {
+            transferring && transmitting -> "sending photo"
+            transferring -> "sending photo, waiting"
+            transmitting -> "sending"
+            burstSending -> "range test"
+            !wantListening -> "paused"
+            captureSource == null -> "starting the mic"
+            micLevel > 0.05f -> "listening, loud room"
+            else -> "listening"
+        }
+
     /** Android blocks background mic access anyway; stop cleanly and resume on return. */
     fun onForeground() {
         inForeground = true
@@ -130,13 +156,13 @@ class MainViewModel(app: Application) : AndroidViewModel(app), SoundLink.Callbac
         if (!canSend) return
         val text = draft
         val bytes = text.toByteArray(Charsets.UTF_8)
-        val pid = protocolId
-        val vol = effectiveTxVolume
+        val pid = textProtocolId
+        val vol = effectiveVolumeFor(pid)
         status = null
         link.post {
             val ok = link.transmit(bytes, pid, vol)
             main.post {
-                if (ok) addLog(LogEntry.Kind.TX, text, pid, bytes.size)
+                if (ok) { addLog(LogEntry.Kind.TX, text, pid, bytes.size); if (draft == text) draft = "" }
                 else status = "${Modem.protocolName(pid)} refused to encode ${bytes.size} bytes"
             }
         }
@@ -147,8 +173,8 @@ class MainViewModel(app: Application) : AndroidViewModel(app), SoundLink.Callbac
         burstSending = true
         burstSent = 0
         burstCancel.set(false)
-        val pid = protocolId
-        val vol = effectiveTxVolume
+        val pid = textProtocolId
+        val vol = effectiveVolumeFor(pid)
         addLog(LogEntry.Kind.INFO, "Test burst started: $BURST_COUNT x ${BURST_PAYLOAD_BYTES} bytes, ${BURST_GAP_MS / 1000} s gap", pid, 0)
         link.post {
             var sent = 0
@@ -213,13 +239,13 @@ class MainViewModel(app: Application) : AndroidViewModel(app), SoundLink.Callbac
         val total = when (f) { is Transfer.Frame.Data -> f.total; is Transfer.Frame.End -> f.total; else -> return }
         val x = incoming.getOrPut(f.id) {
             Transfer.Incoming(f.id, total).also {
-                it.logId = addLog(LogEntry.Kind.RX, "incoming transfer", protocolId, 0, progress = "0 / $total chunks")
+                it.logId = addLog(LogEntry.Kind.RX, "incoming photo", protocolId, 0, progress = "receiving, 0 of $total", fraction = 0f)
             }
         }
         x.lastAt = SystemClock.elapsedRealtime()
         if (f is Transfer.Frame.Data && !x.complete && f.seq < x.total) {
             x.parts[f.seq] = f.bytes
-            updateLog(x.logId) { it.with(progress = "${x.received} / ${x.total} chunks") }
+            updateLog(x.logId) { it.with(progress = "receiving, ${x.received} of ${x.total}", fraction = x.received.toFloat() / x.total) }
             if (x.received == x.total) finishIncoming(x, protocolId)
         }
         if (f is Transfer.Frame.End) {
@@ -262,9 +288,9 @@ class MainViewModel(app: Application) : AndroidViewModel(app), SoundLink.Callbac
         when (kind) {
             Transfer.KIND_JPEG -> {
                 val bmp = BitmapFactory.decodeByteArray(content, 0, content.size)
-                updateLog(x.logId) { it.with(text = if (bmp != null) "photo ${bmp.width}×${bmp.height}" else "photo (undecodable)", image = bmp, progress = null, bytes = content.size) }
+                updateLog(x.logId) { it.with(text = if (bmp != null) "" else "photo could not be decoded", image = bmp, progress = null, fraction = null, bytes = content.size) }
             }
-            else -> updateLog(x.logId) { it.with(text = String(content, Charsets.UTF_8), progress = null, bytes = content.size) }
+            else -> updateLog(x.logId) { it.with(text = String(content, Charsets.UTF_8), progress = null, fraction = null, bytes = content.size) }
         }
         // the sender may finish its pass later; DONE goes out when its END arrives, and once now
         val pid = protocolId
@@ -302,14 +328,14 @@ class MainViewModel(app: Application) : AndroidViewModel(app), SoundLink.Callbac
     }
 
     private fun startTransfer(kind: Int, content: ByteArray, label: String, preview: Bitmap?) {
-        val pid = protocolId
+        val pid = photoProtocolId
         val id = Random.nextInt(256)
         val chunks = Transfer.chunks(id, kind, content)
         if (chunks == null) { status = "Too large to send (${content.size} B)"; return }
         val vol = effectiveVolumeFor(pid)
         val perChunk = Modem.airtime(pid, Transfer.MAX_FRAME) ?: 3f
-        val logId = addLog(LogEntry.Kind.TX, label, pid, content.size, image = preview,
-            progress = "0 / ${chunks.size} chunks, about ${(chunks.size * (perChunk + 0.4f)).toInt()} s")
+        val logId = addLog(LogEntry.Kind.TX, "", pid, content.size, image = preview,
+            progress = "sending, about ${(chunks.size * (perChunk + 0.4f)).toInt()} s", fraction = 0f)
         transferring = true
         status = null
         if (!wantListening) setListening(true)   // needed to hear the receiver's requests
@@ -326,7 +352,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app), SoundLink.Callbac
                     link.transmit(chunks[seq], pid, vol)
                     sent++
                     val n = sent
-                    main.post { updateLog(logId) { it.with(progress = "$n / ${chunks.size} chunks" + if (round > 0) ", round ${round + 1}" else "") } }
+                    main.post { updateLog(logId) { it.with(progress = "sending, $n of ${chunks.size}" + if (round > 0) ", round ${round + 1}" else "", fraction = minOf(1f, n.toFloat() / chunks.size)) } }
                 }
                 var reply: Transfer.Frame? = null
                 for (attempt in 0 until END_ATTEMPTS) {   // repeat END if no reply is heard
@@ -352,7 +378,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app), SoundLink.Callbac
             val done = outcome
             main.post {
                 transferring = false
-                updateLog(logId) { it.with(progress = "$done, ${chunks.size} chunks" + if (round > 0) ", ${round + 1} rounds" else "") }
+                updateLog(logId) { it.with(progress = if (done == "delivered") null else done, fraction = null) }
                 Log.i(TAG, "transfer $id: $done")
             }
         }
@@ -387,9 +413,9 @@ class MainViewModel(app: Application) : AndroidViewModel(app), SoundLink.Callbac
 
     // ---- helpers ------------------------------------------------------------------------
 
-    private fun addLog(kind: LogEntry.Kind, text: String, protocolId: Int, bytes: Int, image: Bitmap? = null, progress: String? = null): Long {
+    private fun addLog(kind: LogEntry.Kind, text: String, protocolId: Int, bytes: Int, image: Bitmap? = null, progress: String? = null, fraction: Float? = null): Long {
         val id = nextLogId++
-        log.add(0, LogEntry(id, clock.format(Date()), kind, text, Modem.protocolName(protocolId), bytes, image, progress))
+        log.add(0, LogEntry(id, clock.format(Date()), kind, text, Modem.protocolName(protocolId), bytes, image, progress, fraction))
         while (log.size > MAX_LOG) log.removeAt(log.size - 1)
         return id
     }

@@ -51,6 +51,9 @@ class Modem(sampleRate: Int, samplesPerFrame: Int = SAMPLES_PER_FRAME) : AutoClo
         /** Sotto Fast. */
         const val DEFAULT_PROTOCOL_ID = 100
 
+        /** Sotto Near: four tones at once, for photos at arm's length. */
+        const val NEAR_PROTOCOL_ID = 103
+
         /** ggwave sums up to six tones, so its `volume` must stay low or the sum clips. */
         const val GGWAVE_MAX_VOLUME = 25
 
