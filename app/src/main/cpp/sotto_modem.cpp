@@ -30,10 +30,12 @@ constexpr float kTailAlpha     = SOTTO_TAIL_ALPHA;  // fraction of the previous 
 constexpr int   kSyncSeed[kSyncSymbols] = { 5, 42, 21, 58 };
 
 const Params kProtocols[] = {
-    // id   name               N     first step bits      band at 48 kHz
-    { 100, "Sotto Fast",       1024,  44,   1,   6 },   // 2.06-8.02 kHz, 21 ms symbols
-    { 101, "Sotto Robust",     2048,  88,   2,   6 },   // 2.06-8.04 kHz, 43 ms symbols
-    { 102, "Sotto Ultrasound", 2048, 704,   2,   5 },   // 16.5-19.5 kHz, 43 ms symbols; phones measured 16 dB louder at 18 kHz than 15 kHz
+    // id   name               N     first step bits parity   band at 48 kHz
+    { 100, "Sotto Fast",       1024,  44,   1,   6,  32 },   // 2.06-8.02 kHz, 21 ms symbols
+    { 101, "Sotto Robust",     2048,  88,   2,   6,  32 },   // 2.06-8.04 kHz, 43 ms symbols
+    { 102, "Sotto Ultrasound", 2048, 704,   2,   5,  64 },   // 16.5-19.5 kHz, 43 ms symbols. Phones measured
+                                                             // 16 dB louder at 18 kHz than 15 kHz; 2 cm
+                                                             // wavelengths fade single tones, hence rate 1/2
 };
 
 uint16_t crc16(const uint8_t * d, int n) {           // CRC-16/CCITT-FALSE
@@ -45,8 +47,9 @@ uint16_t crc16(const uint8_t * d, int n) {           // CRC-16/CCITT-FALSE
     return crc;
 }
 
-int parityBytes(int frameBytes) {
-    return std::min(32, std::max(6, (frameBytes + 1) / 2));
+int parityBytes(const Params & p, int frameBytes) {
+    if (p.parityMax > 32) return std::min(p.parityMax, std::max(8, frameBytes));   // rate 1/2
+    return std::min(p.parityMax, std::max(6, (frameBytes + 1) / 2));
 }
 
 // Tone for header symbol k of a payload of length len: a hash, so that any two lengths
@@ -95,7 +98,7 @@ const Params * protocolById(int id) {
 
 int symbolCount(const Params & p, int n) {
     const int frame = n + 3;
-    const int code = frame + parityBytes(frame);
+    const int code = frame + parityBytes(p, frame);
     return kSyncSymbols + kHeaderSymbols + (code * 8 + p.bits - 1) / p.bits;
 }
 
@@ -114,7 +117,7 @@ std::vector<int16_t> encode(const Params & p, const uint8_t * payload, int n, fl
     const uint16_t crc = crc16(frame.data(), static_cast<int>(frame.size()));
     frame.push_back(static_cast<uint8_t>(crc >> 8));
     frame.push_back(static_cast<uint8_t>(crc & 0xFF));
-    const int par = parityBytes(static_cast<int>(frame.size()));
+    const int par = parityBytes(p, static_cast<int>(frame.size()));
     std::vector<uint8_t> code(frame.size() + par);
     RS::ReedSolomon rs(static_cast<uint8_t>(frame.size()), static_cast<uint8_t>(par));
     rs.Encode(frame.data(), code.data());
@@ -226,7 +229,7 @@ void Decoder::debugStats(const char * what, size_t erasures) const {
     const double tone = m_toneCount ? m_toneSum / m_toneCount : 0;
     const double toneDb = 10 * std::log10(std::max(tone, 1e-12) / ref);
     const double floorDb = 10 * std::log10(std::max(floorMean, 1e-12) / ref);
-    char b[320];
+    char b[640];
     int n = std::snprintf(b, sizeof b, "%s: tone %.0f dBFS, floor %.0f dBFS/bin, snr %.0f dB, %zu erasures, %d symbols; low>high",
                           what, toneDb, floorDb, toneDb - floorDb, erasures, m_toneCount);
     // mean received tone level per eighth of the band, both sets merged by frequency order
@@ -235,6 +238,14 @@ void Decoder::debugStats(const char * what, size_t erasures) const {
         double sum = 0; int cnt = 0;
         for (int i = gI * per; i < (gI + 1) * per; ++i) { sum += m_binSum[i]; cnt += m_binCount[i]; }
         n += std::snprintf(b + n, sizeof b - n, cnt ? " %.0f" : " .", cnt ? 10 * std::log10(std::max(sum / cnt, 1e-12) / ref) : 0.0);
+    }
+    // one character per data symbol: how far the winning tone beat the runner-up
+    // ('#' over 6 dB, '+' 3-6 dB, '?' 2-3 dB, '!' under 2 dB)
+    n += std::snprintf(b + n, sizeof b - n, " |");
+    for (size_t i = 0; i < m_conf.size() && n < static_cast<int>(sizeof b) - 2; ++i) {
+        const float r = m_conf[i];
+        b[n++] = r >= 4.0f ? '#' : r >= 2.0f ? '+' : r >= 1.6f ? '?' : '!';
+        b[n] = 0;
     }
     onDebug(b);
 }
@@ -402,7 +413,7 @@ bool Decoder::decideHeader() {
     m_t0 += bestOff;
     m_payloadLen = bestLen;
     const int frame = bestLen + 3;
-    const int code = frame + parityBytes(frame);
+    const int code = frame + parityBytes(m_p, frame);
     m_frameSymbols = (code * 8 + m_p.bits - 1) / m_p.bits;
     m_g = kSyncSymbols + kHeaderSymbols;
     m_nextHop = m_t0 + 4 * (m_g - (kSyncSymbols - 1));
@@ -412,7 +423,7 @@ bool Decoder::decideHeader() {
 // One Reed-Solomon attempt on a symbol vector: unpack, correct, check length and CRC.
 bool Decoder::tryDecode(const std::vector<int> & syms, const std::vector<uint8_t> & erasures, std::vector<uint8_t> & out) const {
     const int frame = m_payloadLen + 3;
-    const int par = parityBytes(frame);
+    const int par = parityBytes(m_p, frame);
     const int code = frame + par;
     std::vector<uint8_t> codeBytes(code);
     unpackBits(syms.data(), m_frameSymbols, m_p.bits, code * 8, codeBytes.data());
@@ -430,7 +441,7 @@ bool Decoder::tryDecode(const std::vector<int> & syms, const std::vector<uint8_t
 // confident symbols swapped for their runner-up tones in every combination.
 bool Decoder::finishFrame(const OnMessage & onMessage) {
     const int frame = m_payloadLen + 3;
-    const int par = parityBytes(frame);
+    const int par = parityBytes(m_p, frame);
     const int code = frame + par;
     std::vector<uint8_t> out(frame);
 

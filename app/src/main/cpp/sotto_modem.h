@@ -27,6 +27,8 @@ struct Params {
     int          firstBin;  // FFT bin (at symbolLen points) of the lowest tone
     int          binStep;   // bins between adjacent tones
     int          bits;      // bits per symbol; alphabet is 1 << bits tones per set
+    int          parityMax; // Reed-Solomon parity: half the frame (32 max) or, for bands with
+                            // narrow fades, the whole frame (64 max)
 };
 
 int            protocolCount();
