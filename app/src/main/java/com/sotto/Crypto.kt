@@ -13,7 +13,8 @@ import javax.crypto.spec.SecretKeySpec
  * Checked against the RFC test vectors; see tools/ for the reference implementation.
  */
 object Crypto {
-    private val P = BigInteger.TWO.pow(255).subtract(BigInteger.valueOf(19))
+    // valueOf(2), not BigInteger.TWO: that constant only exists from Android 12 and crashed Android 9 at launch
+    private val P = BigInteger.valueOf(2).pow(255).subtract(BigInteger.valueOf(19))
     private val A24 = BigInteger.valueOf(121665)
     private val BASE = ByteArray(32).also { it[0] = 9 }
 
@@ -48,7 +49,7 @@ object Crypto {
             z2 = e.multiply(aa.add(A24.multiply(e))).mod(P)
         }
         if (swap == 1) { val tx = x2; x2 = x3; x3 = tx; val tz = z2; z2 = z3; z3 = tz }
-        val r = x2.multiply(z2.modPow(P.subtract(BigInteger.TWO), P)).mod(P)
+        val r = x2.multiply(z2.modPow(P.subtract(BigInteger.valueOf(2)), P)).mod(P)
         val out = r.toByteArray().reversedArray().copyOf(32)   // little-endian, padded
         return out
     }
