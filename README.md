@@ -179,9 +179,12 @@ payloads.
   a relay show as "farther".
 - **Phones repeat for each other.** A phone that hears a message plays it again once, after a
   random pause and only when the band is quiet, unless another phone repeats it first. Two
-  hops by default, so a phone in the doorway carries a message into the next room. Relayed
-  tiles say "via" whoever repeated them. Photos are forwarded whole, hop by hop, after the
-  relay has received them completely. Settings can switch a phone's repeating off.
+  hops by default, so a phone in the doorway carries a message into the next room. A relay
+  bridges the two media in both directions: whoever it is repeating for is somewhere the
+  sender did not reach, so it goes out over Bluetooth and over the speaker as well whenever
+  some phone it knows of is not visible on the radio. Relayed tiles say "via" whoever repeated
+  them. Photos are forwarded whole, hop by hop, after the relay has received them completely.
+  Settings can switch a phone's repeating off.
 - **Silent messages** on by default: text goes on ultrasound, photos on Near (audible, at
   arm's length). Settings can switch messages to the audible Fast band for range, or pin
   any protocol for everything. Loudness slider defaults to full; ggwave protocols are

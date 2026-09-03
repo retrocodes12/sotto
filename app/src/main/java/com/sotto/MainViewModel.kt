@@ -841,20 +841,39 @@ class MainViewModel(app: Application) : AndroidViewModel(app), SoundLink.Callbac
      * Flooding with suppression: repeat after a random pause unless another phone repeats
      * first, and only once the band is quiet.
      */
+    /**
+     * Repeats a frame for the phones the sender could not reach.
+     *
+     * A relay is the one place where picking a single transport is wrong: whoever this is being
+     * repeated for is, by definition, somewhere the sender's own transmission did not arrive, and
+     * this phone cannot know which of the two media they are on. So it goes over the radio when
+     * the radio has peers, and over the speaker as well whenever some phone it knows of is not
+     * visible on the radio. When everyone in the room is on the radio, the airtime is saved.
+     */
     private fun scheduleRelay(key: Long, frame: ByteArray, protocolId: Int) {
         val cancelled = AtomicBoolean(false)
         pendingRelays[key] = cancelled
         val wait = RELAY_MIN_WAIT_MS + Random.nextLong(0, RELAY_JITTER_MS)
         val vol = effectiveVolumeFor(overSpeaker(protocolId))
+        val radioPeers = if (bluetoothOn) ble.nearbyIds(PRESENT_FOR_MS).toSet() else emptySet()
+        val someoneOffRadio = identity.nearby(PRESENT_FOR_MS).any { it !in radioPeers } || radioPeers.isEmpty()
         link.post {
             SystemClock.sleep(wait)
             if (cancelled.get()) { Log.i(TAG, "relay suppressed, someone else repeated it"); return@post }
-            if (!bleReady()) link.waitUntilQuiet(RELAY_QUIET_WAIT_MS)
-            if (cancelled.get()) return@post
-            Log.i(TAG, "relaying ${frame.size} B")
-            if (!(bleReady() && ble.send(frame) { ok -> if (!ok) overTheSpeaker(frame, protocolId, vol, quiet = false) })) {
-                link.transmit(frame, overSpeaker(protocolId), vol)
+
+            val onRadio = bleReady() && ble.send(frame) { ok ->
+                if (!ok && !cancelled.get()) overTheSpeaker(frame, protocolId, vol, quiet = false)
             }
+            if (!someoneOffRadio && onRadio) {
+                Log.i(TAG, "relayed ${frame.size} B over Bluetooth")
+                main.post { pendingRelays.remove(key) }
+                return@post
+            }
+
+            link.waitUntilQuiet(RELAY_QUIET_WAIT_MS)
+            if (cancelled.get()) return@post
+            Log.i(TAG, "relayed ${frame.size} B by sound${if (onRadio) " and Bluetooth" else ""}")
+            link.transmit(frame, overSpeaker(protocolId), vol)
             main.post { pendingRelays.remove(key) }
         }
     }
