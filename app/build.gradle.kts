@@ -12,6 +12,9 @@ plugins {
  */
 val shippingKeystore = File(System.getProperty("user.home"), ".android/debug.keystore")
 
+/** True only when a release variant was actually asked for. */
+val buildingRelease = gradle.startParameter.taskNames.any { it.contains("Release", ignoreCase = true) }
+
 android {
     namespace = "com.sotto"
     compileSdk = 36
@@ -57,13 +60,17 @@ android {
         release {
             // findByName returns null when the keystore is not on this machine, and a null
             // signingConfig does not fail the build -- it produces an unsigned APK that no
-            // phone will install. Better to stop here and say why.
+            // phone will install. Stop, and say why. Only when a release was actually asked
+            // for, though: this block is configured on every invocation, so throwing here
+            // unconditionally also broke running the tests on a machine without the key.
             val shipping = signingConfigs.findByName("shipping")
-                ?: throw GradleException(
+            if (buildingRelease && shipping == null) {
+                throw GradleException(
                     "No signing key at $shippingKeystore. Release builds are signed with the " +
                         "Android debug key that published builds have always used; without it " +
                         "an update would not install over the top. Use assembleDebug instead.",
                 )
+            }
             // Left off deliberately. R8 would rename com.sotto.Modem, whose native methods are
             // bound by name from jni_bridge.cpp, and the ViewModel that the lifecycle library
             // constructs reflectively. Both fail at run time, not at build time, so this waits

@@ -34,12 +34,6 @@ jobs:
           echo "Installing NDK $NDK"
           yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "ndk;$NDK" > /dev/null
 
-      - name: Unit tests
-        run: ./gradlew --no-daemon testDebugUnitTest
-
-      - name: Lint
-        run: ./gradlew --no-daemon lintDebug
-
       - name: Signing key
         run: |
           # The release variant is signed with the machine's Android debug key and refuses to
@@ -52,6 +46,12 @@ jobs:
               -keyalg RSA -keysize 2048 -validity 10000 \
               -dname "C=US, O=Android, CN=Android Debug"
           fi
+
+      - name: Unit tests
+        run: ./gradlew --no-daemon testDebugUnitTest
+
+      - name: Lint
+        run: ./gradlew --no-daemon lintDebug
 
       - name: Build
         run: ./gradlew --no-daemon assembleDebug assembleRelease
