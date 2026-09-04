@@ -375,12 +375,15 @@ v0.24, and honest about it. What has been proven and what has not are different 
 Proven on two real phones: the ultrasound mode, tuned to their measured response, decoding
 10/10 at 25 cm and at 2 m, and 7/10 through one wall off sight.
 
-Proven on this laptop, by eighty tests that run in a second: the modem against a simulated
+Proven on this laptop, by eighty-four tests that run in a second: the modem against a simulated
 channel including dropouts, with a pass/fail gate under it; the X25519 against the RFC 7748
 vectors; the AEAD against every single-bit tamper; the anti-replay window against every order
 its inputs can arrive in; every frame parser against a hundred thousand hostile inputs; the
 carry network as a set of phones meeting in a chosen order and forging receipts at each other.
-The modem is also clean under AddressSanitizer and UndefinedBehaviorSanitizer.
+The modem is also clean under AddressSanitizer and UndefinedBehaviorSanitizer. And the junction
+where those three families of frame are told apart is tested as a whole -- every frame the app
+can send must be claimed by exactly one of the three routers -- because the bug below was a
+router that claimed none of its own.
 
 Those tests were written after a twelve-dimension audit of this codebase found eighty-two
 defects, and they exist because of what it found. Two of them mattered more than the rest: the

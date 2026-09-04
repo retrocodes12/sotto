@@ -657,7 +657,12 @@ class MainViewModel(app: Application) : AndroidViewModel(app), SoundLink.Callbac
         val app = getApplication<Application>()
         val cached = Updates.cachedApk(app, r.version)
         if (cached != null) {
-            if (!Updates.install(app, cached)) updateNote = "Allow Sotto to install updates, then tap again."
+            when (Updates.install(app, cached)) {
+                Updates.Install.STARTED -> updateNote = null
+                Updates.Install.NEEDS_PERMISSION -> updateNote = "Allow Sotto to install updates, then tap again."
+                // The cached file is gone now, so the next tap downloads it again.
+                Updates.Install.NOT_OURS -> { updateNote = NOT_OURS_NOTE; updateProgress = -1 }
+            }
             return
         }
         if (updateProgress in 0..99) return
@@ -667,7 +672,11 @@ class MainViewModel(app: Application) : AndroidViewModel(app), SoundLink.Callbac
             val file = Updates.download(app, r) { p -> updateProgress = p }
             if (file == null) { updateProgress = -1; updateNote = "Download failed. Try again."; return@launch }
             updateProgress = 100
-            if (!Updates.install(app, file)) updateNote = "Allow Sotto to install updates, then tap again."
+            when (Updates.install(app, file)) {
+                Updates.Install.STARTED -> updateNote = null
+                Updates.Install.NEEDS_PERMISSION -> updateNote = "Allow Sotto to install updates, then tap again."
+                Updates.Install.NOT_OURS -> { updateNote = NOT_OURS_NOTE; updateProgress = -1 }
+            }
         }
     }
 
@@ -1428,6 +1437,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app), SoundLink.Callbac
         private const val TAG = "Sotto"
         const val MAX_BYTES = 100
         const val DEFAULT_TX_VOLUME = 100
+        private const val NOT_OURS_NOTE = "That download is not signed by this project. It has been deleted."
         /** The room's slot in the unread map. Not a real id: ids are 16 bit and this is not. */
         private const val ROOM = -1
         /** A profile lives a week; republishing one that has not changed is pure noise. */

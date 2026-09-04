@@ -27,6 +27,14 @@ constexpr float kFloorAlpha    = 0.02f;
 #define SOTTO_TAIL_ALPHA 0.5f
 #endif
 constexpr float kTailAlpha     = SOTTO_TAIL_ALPHA;  // fraction of the previous window's energy to cancel
+// Four sync tones. Note that on a 4-bit protocol these reduce to 5, 10, 5, 10 -- two tones
+// alternating, not four distinct ones -- and both of the app's defaults are 4-bit. That looks
+// like it should cost false syncs, so it was measured rather than assumed: ten minutes of white
+// noise per protocol gives zero false syncs, and forty frames of every protocol fed to every
+// other decoder (which is what the app actually does, decoding all four on one stream) gives
+// one, between two bands 10 kHz apart. Changing these values would break the wire format for
+// no measured gain, so they stay. If the format ever changes for another reason, { 3, 41, 22,
+// 60 } is distinct under both 16 and 64.
 constexpr int   kSyncSeed[kSyncSymbols] = { 5, 42, 21, 58 };
 
 const Params kProtocols[] = {

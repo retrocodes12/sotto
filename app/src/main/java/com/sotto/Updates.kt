@@ -2,6 +2,8 @@ package com.sotto
 
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
+import android.os.Build
 import android.net.Uri
 import android.provider.Settings
 import androidx.core.content.FileProvider
@@ -157,24 +159,62 @@ object Updates {
     }
 
     /**
-     * Hand the APK to the system installer. Returns false when the app still lacks the
-     * "install unknown apps" permission; the matching settings screen is opened so the
-     * user can grant it and tap again.
+     * Hand the APK to the system installer, once it is established that the file is this same
+     * app signed by the same key. NEEDS_PERMISSION means "install unknown apps" is still off,
+     * and the matching settings screen has been opened so the user can grant it and tap again.
      */
-    fun install(context: Context, apk: File): Boolean {
+    /**
+     * Is this APK the same app, signed by the same key as the copy that is running?
+     *
+     * Android refuses a differently-signed update anyway, but it refuses it after the user has
+     * tapped through the installer, with a message that explains nothing -- and it does not
+     * check the package name at all until then. Checking here means a wrong file is named as
+     * wrong and deleted, rather than becoming an update that fails the same way every time.
+     */
+    private fun sameAppSameKey(context: Context, apk: File): Boolean = runCatching {
+        val pm = context.packageManager
+        @Suppress("DEPRECATION")
+        val flags = if (Build.VERSION.SDK_INT >= 28) PackageManager.GET_SIGNING_CERTIFICATES else PackageManager.GET_SIGNATURES
+        val downloaded = pm.getPackageArchiveInfo(apk.absolutePath, flags) ?: return@runCatching false
+        if (downloaded.packageName != context.packageName) return@runCatching false
+        val theirs = certificatesOf(downloaded)
+        val ours = certificatesOf(pm.getPackageInfo(context.packageName, flags))
+        theirs.isNotEmpty() && theirs == ours
+    }.getOrDefault(false)
+
+    private fun certificatesOf(info: android.content.pm.PackageInfo): Set<String> {
+        @Suppress("DEPRECATION")
+        val signatures = if (Build.VERSION.SDK_INT >= 28) {
+            info.signingInfo?.let { if (it.hasMultipleSigners()) it.apkContentsSigners else it.signingCertificateHistory }
+        } else {
+            info.signatures
+        }
+        val digest = java.security.MessageDigest.getInstance("SHA-256")
+        return signatures.orEmpty().filterNotNull()
+            .map { signature -> Crypto.toHex(digest.digest(signature.toByteArray())) }
+            .toSet()
+    }
+
+    enum class Install { STARTED, NEEDS_PERMISSION, NOT_OURS }
+
+    fun install(context: Context, apk: File): Install {
+        if (!sameAppSameKey(context, apk)) {
+            apk.delete()
+            return Install.NOT_OURS
+        }
         if (!context.packageManager.canRequestPackageInstalls()) {
             runCatching {
                 context.startActivity(
                     Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES, Uri.parse("package:${context.packageName}")).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
                 )
             }
-            return false
+            return Install.NEEDS_PERMISSION
         }
         val uri = FileProvider.getUriForFile(context, "${context.packageName}.updates", apk)
         val intent = Intent(Intent.ACTION_VIEW).apply {
             setDataAndType(uri, "application/vnd.android.package-archive")
             addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK)
         }
-        return runCatching { context.startActivity(intent); true }.getOrDefault(false)
+        return if (runCatching { context.startActivity(intent) }.isSuccess) Install.STARTED else Install.NEEDS_PERMISSION
     }
 }

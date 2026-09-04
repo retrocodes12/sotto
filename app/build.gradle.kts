@@ -24,8 +24,8 @@ android {
         applicationId = "com.sotto"
         minSdk = 26
         targetSdk = 35
-        versionCode = 18
-        versionName = "0.25"
+        versionCode = 19
+        versionName = "0.26"
 
         ndk {
             abiFilters += listOf("arm64-v8a", "armeabi-v7a", "x86_64")
