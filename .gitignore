@@ -5,3 +5,6 @@ build/
 local.properties
 .cxx/
 .kotlin/
+core.*
+*.core
+.claude-flow/

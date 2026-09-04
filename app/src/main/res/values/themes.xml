@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!--
+      The window the system paints before the first Compose frame. It was Material Light
+      whatever the phone was set to, so opening Sotto on a dark phone flashed white first.
+    -->
+    <style name="Theme.Sotto" parent="@android:style/Theme.Material.Light.NoActionBar">
+        <item name="android:windowBackground">@color/window</item>
+    </style>
+</resources>

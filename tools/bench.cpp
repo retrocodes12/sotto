@@ -53,12 +53,23 @@ GGWave::Parameters ggParams(int mode) {
 
 struct Channel {
     float noiseRms; bool room; std::mt19937 & rng;
+    // Someone walks between the phones, a hand covers the microphone, a door swings shut. The
+    // signal does not get noisier, it goes away for a moment. This is the case the erasure and
+    // chase decoders exist for, and until it was modelled here nothing exercised them.
+    int fades = 0; float fadeMs = 45;
 
     std::vector<int16_t> apply(const std::vector<float> & tx) {
         std::uniform_real_distribution<float> U(0, 1);
         const int lead = kFs * (0.3f + 0.7f * U(rng)), tail = kFs / 2;
         std::vector<float> x(lead + tx.size() + tail, 0.0f);
         for (size_t i = 0; i < tx.size(); ++i) x[lead + i] = tx[i] * kDistanceGain;
+
+        for (int f = 0; f < fades; ++f) {
+            const size_t width = static_cast<size_t>(kFs * fadeMs / 1000.0f);
+            if (tx.size() <= width) break;
+            const size_t at = lead + static_cast<size_t>(U(rng) * (tx.size() - width));
+            for (size_t i = at; i < at + width && i < x.size(); ++i) x[i] *= 0.003f;   // about -50 dB
+        }
 
         if (room) {
             // speaker/mic tilt: split at 4 kHz, random gain per band (+-8 dB)
@@ -97,7 +108,7 @@ struct Channel {
 
 } // namespace
 
-int diag(int protoIndex, float noiseDb, bool room, int trials) {
+int diag(int protoIndex, float noiseDb, bool room, int trials, int fades = 0) {
     std::mt19937 rng(99);
     const sotto::Params & p = sotto::protocol(protoIndex);
     int ok = 0; std::map<std::string, int> reasons;
@@ -105,6 +116,7 @@ int diag(int protoIndex, float noiseDb, bool room, int trials) {
         std::vector<uint8_t> msg(kPayload); for (auto & b : msg) b = 32 + rng() % 95;
         auto w = sotto::encode(p, msg.data(), msg.size(), 1.0f);
         Channel ch{ std::pow(10.0f, noiseDb / 20), room, rng };
+        ch.fades = fades;
         auto s = ch.apply(normalise(w.data(), w.size()));
         sotto::Decoder dec(p); bool got = false; std::vector<std::string> log;
         dec.onDebug = [&](const char * m) { log.push_back(m); };
@@ -117,8 +129,66 @@ int diag(int protoIndex, float noiseDb, bool room, int trials) {
     return 0;
 }
 
+
+// A pass/fail floor per (protocol, channel, noise) cell, so a change that quietly makes the
+// modem worse fails the build instead of printing a slightly smaller number nobody reads.
+// The floors sit well under what the modem measures today: this catches regressions, it is
+// not a benchmark. Seeds are fixed per cell, so the answer is the same on every machine.
+struct GateCell { int proto; bool room; float noiseDb; int minPct; const char * why; int fades = 0; };
+
+int gate(int trials) {
+    static const GateCell cells[] = {
+        { 2, false, -15, 90, "the default protocol, free field" },
+        { 2, true,  -15, 85, "the default protocol, in a room" },
+        { 0, false, -20, 90, "audible, free field" },
+        { 0, true,  -15, 70, "audible, in a room" },
+        { 1, false, -10, 90, "the robust fallback, free field" },
+        { 1, true,  -10, 50, "the robust fallback, in a room" },
+        { 3, false, -25, 85, "arm's length, free field" },
+        { 3, true,  -40, 70, "arm's length, in a room" },
+        { 2, true,  -30, 60, "the default protocol, two dropouts", 2 },
+        { 1, true,  -30, 60, "the robust fallback, two dropouts", 2 },
+    };
+    const int n = sizeof(cells) / sizeof(cells[0]);
+    printf("Modem gate: %d trials per cell, %d-byte payload, fixed seeds.\n\n", trials, kPayload);
+    printf("%-18s %-15s %8s %9s %7s\n", "protocol", "channel", "noise", "decoded", "floor");
+    int failures = 0;
+    for (int i = 0; i < n; ++i) {
+        const GateCell & c = cells[i];
+        const sotto::Params & p = sotto::protocol(c.proto);
+        std::mt19937 rng(7000 + i * 17);
+        int ok = 0;
+        for (int t = 0; t < trials; ++t) {
+            std::vector<uint8_t> msg(kPayload);
+            for (auto & b : msg) b = 32 + rng() % 95;
+            auto w = sotto::encode(p, msg.data(), msg.size(), 1.0f);
+            Channel ch{ std::pow(10.0f, c.noiseDb / 20), c.room, rng };
+            ch.fades = c.fades;
+            auto s = ch.apply(normalise(w.data(), w.size()));
+            sotto::Decoder dec(p);
+            int decodes = 0; bool got = false;
+            for (size_t off = 0; off < s.size(); off += 1024)
+                dec.feed(s.data() + off, std::min<size_t>(1024, s.size() - off),
+                         [&](const uint8_t * d, int len) { ++decodes; got = got || std::vector<uint8_t>(d, d + len) == msg; });
+            if (got && decodes == 1) ++ok;
+        }
+        const int pct = 100 * ok / trials;
+        const bool pass = pct >= c.minPct;
+        if (!pass) ++failures;
+        char where[32];
+        snprintf(where, sizeof(where), "%s%s", c.room ? "room" : "free field", c.fades ? " + dropouts" : "");
+        printf("%-18s %-15s %5.0f dBFS %8d%% %6d%%  %s\n", p.name, where, c.noiseDb, pct, c.minPct,
+               pass ? "ok" : "FAIL <-- worse than it was");
+        fflush(stdout);
+    }
+    if (failures) printf("\n%d of %d cells fell below their floor. The modem regressed.\n", failures, n);
+    else printf("\nAll %d cells at or above their floor.\n", n);
+    return failures ? 1 : 0;
+}
+
 int main(int argc, char ** argv) {
-    if (argc >= 2 && std::string(argv[1]) == "diag") return diag(argc > 2 ? atoi(argv[2]) : 0, argc > 3 ? atof(argv[3]) : -60, argc > 4 ? atoi(argv[4]) != 0 : true, argc > 5 ? atoi(argv[5]) : 200);
+    if (argc >= 2 && std::string(argv[1]) == "gate") return gate(argc > 2 ? atoi(argv[2]) : 40);
+    if (argc >= 2 && std::string(argv[1]) == "diag") return diag(argc > 2 ? atoi(argv[2]) : 0, argc > 3 ? atof(argv[3]) : -60, argc > 4 ? atoi(argv[4]) != 0 : true, argc > 5 ? atoi(argv[5]) : 200, argc > 6 ? atoi(argv[6]) : 0);
     std::mt19937 rng(12345);
     GGWave::setLogFile(nullptr);
     GGWave::Protocols::tx().enableAll();
@@ -127,7 +197,7 @@ int main(int argc, char ** argv) {
         GGWave::Protocols::rx().toggle(id, true);
 
     std::vector<Modem> modems;
-    for (int i : { 0, 1, 3 }) {   // Sotto Fast, Sotto Robust, Sotto Near
+    for (int i : { 0, 1, 2, 3 }) {   // Sotto Fast, Sotto Robust, Sotto Ultrasound, Sotto Near
         const sotto::Params & p = sotto::protocol(i);
         Modem m;
         m.name = p.name;

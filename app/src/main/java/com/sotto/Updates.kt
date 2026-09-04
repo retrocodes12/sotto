@@ -24,6 +24,8 @@ object Updates {
     private const val ASSET_PREFIX = "https://github.com/$REPO/releases/download/"
     const val EVERGREEN_APK = "https://github.com/$REPO/releases/latest/download/sotto.apk"
     private const val TIMEOUT_MS = 10_000
+    private const val MAX_FEED_BYTES = 256 * 1024
+    private const val MAX_APK_BYTES = 200L * 1024 * 1024
 
     data class Release(val version: String, val notes: String, val apkUrl: String, val bytes: Long)
 
@@ -77,7 +79,19 @@ object Updates {
         conn.setRequestProperty("User-Agent", "Sotto/${BuildConfig.VERSION_NAME}")
         try {
             val code = conn.responseCode
-            val body = (if (code in 200..299) conn.inputStream else conn.errorStream)?.bufferedReader()?.use { it.readText() } ?: ""
+            val stream = if (code in 200..299) conn.inputStream else conn.errorStream
+            // A release feed is a few kilobytes. Read a bounded amount so a wrong or hostile
+            // answer cannot pull the phone's memory out from under it.
+            val body = stream?.bufferedReader()?.use { r ->
+                val buf = CharArray(MAX_FEED_BYTES)
+                var n = 0
+                while (n < buf.size) {
+                    val k = r.read(buf, n, buf.size - n)
+                    if (k < 0) break
+                    n += k
+                }
+                String(buf, 0, n)
+            } ?: ""
             if (code !in 200..299) throw RuntimeException("HTTP $code")
             return body
         } finally {
@@ -107,11 +121,11 @@ object Updates {
             conn.connect()
             if (conn.responseCode !in 200..299) { conn.disconnect(); return@withContext null }
             val total = if (conn.contentLength > 0) conn.contentLength.toLong() else release.bytes
+            var done = 0L
             conn.inputStream.use { input ->
                 tmp.outputStream().use { output ->
                     val buf = ByteArray(64 * 1024)
-                    var done = 0L
-                    while (true) {
+                    while (done < MAX_APK_BYTES) {
                         val n = input.read(buf)
                         if (n < 0) break
                         output.write(buf, 0, n)
@@ -121,13 +135,23 @@ object Updates {
                 }
             }
             conn.disconnect()
-            if (tmp.length() <= 0L) { tmp.delete(); return@withContext null }
+            // A connection that drops halfway ends the read the same way a finished one does.
+            // Without this the half APK was promoted, cached as if complete, and offered to the
+            // installer, which refuses it -- leaving an update that fails identically every time.
+            if (done >= MAX_APK_BYTES || tmp.length() <= 0L || (total > 0 && tmp.length() != total)) {
+                tmp.delete()
+                return@withContext null
+            }
             context.cacheDir.listFiles()?.forEach { if (it.name.startsWith("sotto-update-") && it != tmp) it.delete() }
             if (!tmp.renameTo(out)) return@withContext null
             out
         } catch (e: CancellationException) {
+            File(context.cacheDir, "sotto-update-${release.version}.part").delete()
             throw e
         } catch (e: Exception) {
+            // Otherwise a download that fails at 90% leaves most of an APK in internal storage
+            // for ever, and the next attempt starts from nothing beside it.
+            File(context.cacheDir, "sotto-update-${release.version}.part").delete()
             null
         }
     }

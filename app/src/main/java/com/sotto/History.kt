@@ -13,6 +13,7 @@ import java.io.File
 object History {
     private const val FILE = "history.json"
     private const val MAX = 500
+    private const val MAX_PHOTO_EDGE = 1440
 
     private fun photoDir(context: Context) = File(context.filesDir, "photos").also { it.mkdirs() }
     private fun photoFile(context: Context, id: Long) = File(photoDir(context), "$id.jpg")
@@ -22,21 +23,40 @@ object History {
         if (!f.exists()) return emptyList()
         return runCatching {
             val arr = JSONArray(f.readText())
-            (0 until arr.length()).mapNotNull { i ->
-                val o = arr.getJSONObject(i)
-                val id = o.getLong("id")
-                val photo = photoFile(context, id)
-                val image = if (o.optBoolean("photo") && photo.exists()) BitmapFactory.decodeFile(photo.path) else null
-                LogEntry(
-                    id = id, time = o.getString("time"), kind = LogEntry.Kind.valueOf(o.getString("kind")), text = o.optString("text"),
-                    protocol = o.optString("protocol"), bytes = o.optInt("bytes"), image = image,
-                    senderId = if (o.has("sender")) o.getInt("sender") else null, via = if (o.has("via")) o.getInt("via") else null,
-                    peer = if (o.has("peer")) o.getInt("peer") else null, seq = if (o.has("seq")) o.getInt("seq") else null,
-                    delivered = o.optBoolean("delivered"),
-                    card = if (o.has("card")) LogEntry.Card(o.getInt("card"), o.getString("fields").split('\u001F')) else null,
-                )
-            }
+            // Per entry, not per file: one row written by an older version, or half-written when
+            // the battery went, used to throw and take the whole history with it.
+            (0 until arr.length()).mapNotNull { i -> runCatching { entryAt(context, arr.getJSONObject(i)) }.getOrNull() }
         }.getOrDefault(emptyList())
+    }
+
+    private fun entryAt(context: Context, o: JSONObject): LogEntry {
+        val id = o.getLong("id")
+        val photo = photoFile(context, id)
+        val image = if (o.optBoolean("photo") && photo.exists()) readPhoto(photo.path) else null
+        return LogEntry(
+            id = id, time = o.getString("time"), kind = LogEntry.Kind.valueOf(o.getString("kind")), text = o.optString("text"),
+            protocol = o.optString("protocol"), bytes = o.optInt("bytes"), image = image,
+            senderId = if (o.has("sender")) o.getInt("sender") else null, via = if (o.has("via")) o.getInt("via") else null,
+            peer = if (o.has("peer")) o.getInt("peer") else null, seq = if (o.has("seq")) o.getInt("seq") else null,
+            delivered = o.optBoolean("delivered"),
+            card = if (o.has("card")) LogEntry.Card(o.getInt("card"), o.getString("fields").split('\u001F')) else null,
+        )
+    }
+
+    /**
+     * A photo that arrives over sound is at most a few tens of kilobytes, but a JPEG that small
+     * can still decode to several megapixels, and the whole history is loaded at once. Read the
+     * size first and step down to something a screen can use.
+     */
+    private fun readPhoto(path: String): android.graphics.Bitmap? {
+        val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        BitmapFactory.decodeFile(path, bounds)
+        var sample = 1
+        while (maxOf(bounds.outWidth, bounds.outHeight) / sample > MAX_PHOTO_EDGE) sample *= 2
+        return BitmapFactory.decodeFile(path, BitmapFactory.Options().apply {
+            inSampleSize = sample
+            inPreferredConfig = android.graphics.Bitmap.Config.RGB_565
+        })
     }
 
     /** Writes the newest [MAX] finished entries. Call off the main thread. */
@@ -44,7 +64,12 @@ object History {
         val keep = entries.filter { it.fraction == null }.take(MAX)
         val arr = JSONArray()
         for (e in keep) {
-            e.imageBytes?.let { bytes -> val pf = photoFile(context, e.id); if (!pf.exists()) pf.writeBytes(bytes) }
+            // One photo that cannot be written (a full disk) must not abort the save of everything
+            // else, which is what an exception here used to do.
+            e.imageBytes?.let { bytes ->
+                val pf = photoFile(context, e.id)
+                if (!pf.exists()) runCatching { pf.writeBytes(bytes) }
+            }
             val hasPhoto = e.image != null && photoFile(context, e.id).exists()
             arr.put(JSONObject().apply {
                 put("id", e.id); put("time", e.time); put("kind", e.kind.name); put("text", e.text)
@@ -56,8 +81,14 @@ object History {
         }
         val f = File(context.filesDir, FILE)
         val tmp = File(context.filesDir, "$FILE.tmp")
-        tmp.writeText(arr.toString())
-        tmp.renameTo(f)
+        // Write, force it to the platter, then rename. Without the sync the rename can land
+        // before the bytes do, and a battery death in between leaves a file that reads as empty.
+        java.io.FileOutputStream(tmp).use { out ->
+            out.write(arr.toString().toByteArray(Charsets.UTF_8))
+            out.flush()
+            runCatching { out.fd.sync() }
+        }
+        if (!tmp.renameTo(f)) { tmp.delete(); return }   // leave the last good file in place
         // photos no entry refers to any more
         val ids = keep.map { it.id }.toSet()
         photoDir(context).listFiles()?.forEach { pf -> pf.nameWithoutExtension.toLongOrNull()?.let { if (it !in ids) pf.delete() } }

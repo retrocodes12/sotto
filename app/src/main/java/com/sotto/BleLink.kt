@@ -53,8 +53,14 @@ import java.util.UUID
 class BleLink(private val context: Context, private val callbacks: Callbacks) {
 
     interface Callbacks {
-        /** A frame arrived over the radio. Called on the BLE thread. */
-        fun onBleFrame(payload: ByteArray)
+        /**
+         * A frame arrived over the radio, from the device at [link]. Called on the BLE thread.
+         *
+         * [link] is the Bluetooth address of the phone that actually transmitted it, which is
+         * not the same thing as the id inside the frame: that one is written by the sender and
+         * can say anything. Anything that has to hold a sender to a budget must count on this.
+         */
+        fun onBleFrame(payload: ByteArray, link: String)
         /** An advertisement from [id64] (16-bit form [id16]) was seen, [rssi] dBm. BLE thread. */
         fun onBlePresence(id64: Long, id16: Int, rssi: Int)
         /** Something the user should know: null clears it. */
@@ -145,10 +151,18 @@ class BleLink(private val context: Context, private val callbacks: Callbacks) {
             if (!isOn()) { report("Bluetooth is off"); return@post }
             val missing = missingPermissions()
             if (missing.isNotEmpty()) { report("Bluetooth permission not granted"); return@post }
+            if (Build.VERSION.SDK_INT < 31 && !locationEnabled()) {
+                // Below Android 12 a BLE scan needs Location Services on, not merely the
+                // permission. Without it the scan starts, succeeds, and reports nothing at all
+                // for ever -- which looked exactly like nobody being nearby.
+                report("Turn on Location in Android settings; Bluetooth scanning needs it on this version")
+                return@post
+            }
             running = true
             openServer()
             startAdvertising()
             startScanning()
+            handler.postDelayed(peerTick, PEER_TICK_MS)
             Log.i(TAG, "started as ${IdentityStore.tagOf(myId)}")
             report(null)
         }
@@ -156,22 +170,28 @@ class BleLink(private val context: Context, private val callbacks: Callbacks) {
 
     fun stop() {
         wanted = false
-        handler.post {
-            if (!running) return@post
-            running = false
-            stopAdvertising()
-            stopScanning()
-            for (c in conns.values.toList()) c.close()
-            conns.clear()
-            peers.clear()
-            inbox.clear()
-            lastReported.clear()
-            runCatching { server?.close() }
-            server = null
-            characteristic = null
-            Log.i(TAG, "stopped")
-            report(null)
-        }
+        handler.post { if (running) { teardown(); report(null) } }
+    }
+
+    /** Everything [stop] does except deciding we no longer want the radio. On the BLE thread. */
+    private fun teardown() {
+        running = false
+        handler.removeCallbacks(peerTick)
+        stopAdvertising()
+        stopScanning()
+        for (c in conns.values.toList()) c.close()
+        conns.clear()
+        // Both of these are read from other threads -- peers from the main thread whenever
+        // the screen or the carry engine asks who is in range, lastReported from the scan
+        // callback. Clearing them from here without the lock races an iteration and throws
+        // ConcurrentModificationException on whichever thread was reading.
+        synchronized(peers) { peers.clear() }
+        inbox.clear()
+        synchronized(lastReported) { lastReported.clear() }
+        runCatching { server?.close() }
+        server = null
+        characteristic = null
+        Log.i(TAG, "stopped")
     }
 
     fun close() {
@@ -185,7 +205,7 @@ class BleLink(private val context: Context, private val callbacks: Callbacks) {
         if (!running) return false
         synchronized(peers) {
             val now = SystemClock.elapsedRealtime()
-            return peers.values.any { now - it.lastSeen < PEER_FRESH_MS }
+            return peers.values.any { now - it.lastSeen < PEER_SENDABLE_MS }
         }
     }
 
@@ -271,7 +291,9 @@ class BleLink(private val context: Context, private val callbacks: Callbacks) {
                 ADVERTISE_FAILED_FEATURE_UNSUPPORTED -> "this phone cannot advertise over Bluetooth"
                 ADVERTISE_FAILED_DATA_TOO_LARGE -> "Bluetooth advertisement too large"
                 ADVERTISE_FAILED_TOO_MANY_ADVERTISERS -> "another app is using Bluetooth advertising"
-                else -> null
+                // Not null: reporting no note clears the banner, so a phone nobody can see
+                // showed a perfectly healthy Bluetooth section.
+                else -> "Bluetooth advertising failed (code $errorCode)"
             })
         }
     }
@@ -313,7 +335,16 @@ class BleLink(private val context: Context, private val callbacks: Callbacks) {
         override fun onBatchScanResults(results: MutableList<ScanResult>) { for (r in results) handle(r) }
         override fun onScanFailed(errorCode: Int) {
             Log.w(TAG, "scan failed, code $errorCode")
-            report("Bluetooth scanning failed")
+            // running stayed true, and start() returns early when it is, so one failure here
+            // used to end Bluetooth for the life of the process with no way back. Tear it down
+            // and try again: SCAN_FAILED_APPLICATION_REGISTRATION_FAILED in particular clears
+            // on its own once the stack settles.
+            report("Bluetooth scanning failed; retrying")
+            handler.post {
+                if (!running) return@post
+                teardown()
+                if (wanted) handler.postDelayed({ if (wanted && !running) start(myId, myId64) }, RETRY_MS)
+            }
         }
 
         private fun handle(result: ScanResult) {
@@ -344,11 +375,11 @@ class BleLink(private val context: Context, private val callbacks: Callbacks) {
             // Advertisements arrive several times a second; the app only needs to know a phone
             // is there, and every report costs a preferences write and a recomposition.
             val now = SystemClock.elapsedRealtime()
-            val last = lastReported[id64] ?: 0L
-            if (fresh || now - last > PRESENCE_REPORT_MS) {
-                lastReported[id64] = now
-                callbacks.onBlePresence(id64, id, result.rssi)
+            val due = synchronized(lastReported) {
+                val last = lastReported[id64] ?: 0L
+                if (fresh || now - last > PRESENCE_REPORT_MS) { lastReported[id64] = now; true } else false
             }
+            if (due) callbacks.onBlePresence(id64, id, result.rssi)
             if (fresh) { Log.i(TAG, "peer ${IdentityStore.tagOf(id)} at ${result.rssi} dBm"); report(null) }
         }
     }
@@ -414,19 +445,19 @@ class BleLink(private val context: Context, private val callbacks: Callbacks) {
         val msgId = part[2].toInt() and 0xFF
         if (total == 0 || index >= total) return
         val body = part.copyOfRange(3, part.size)
-        if (total == 1) { deliver(body); return }
+        if (total == 1) { deliver(body, address); return }
         val now = SystemClock.elapsedRealtime()
         val held = inbox[address]
         val r = if (held != null && held.total == total && held.msgId == msgId && index != 0 && now - held.at < REASSEMBLE_MS) held
                 else Reassembly(total, msgId).also { inbox[address] = it }
         r.at = now
         r.parts[index] = body
-        if (r.complete()) { inbox.remove(address); deliver(r.join()) }
+        if (r.complete()) { inbox.remove(address); deliver(r.join(), address) }
     }
 
-    private fun deliver(frame: ByteArray) {
+    private fun deliver(frame: ByteArray, link: String) {
         if (frame.isEmpty()) return
-        callbacks.onBleFrame(frame)
+        callbacks.onBleFrame(frame, link)
     }
 
     // ---- sending: outbound connections ------------------------------------------------------
@@ -600,9 +631,35 @@ class BleLink(private val context: Context, private val callbacks: Callbacks) {
 
     // ---- helpers ---------------------------------------------------------------------------
 
+    private var lastNote: String? = null
+    private var lastCount = -1
+
     private fun report(note: String?) {
-        callbacks.onBleState(running, peerCount(), note)
+        lastNote = note
+        lastCount = peerCount()
+        callbacks.onBleState(running, lastCount, note)
     }
+
+    /**
+     * Peers go stale silently: nothing arrives to say somebody left the building, so the count
+     * on screen only ever went up and the app claimed to be carrying messages to phones that
+     * had gone home hours ago.
+     */
+    private val peerTick = object : Runnable {
+        override fun run() {
+            if (!running) return
+            val now = peerCount()
+            if (now != lastCount) { lastCount = now; callbacks.onBleState(true, now, lastNote) }
+            handler.postDelayed(this, PEER_TICK_MS)
+        }
+    }
+
+    private fun locationEnabled(): Boolean = runCatching {
+        val lm = context.getSystemService(android.location.LocationManager::class.java)
+        if (Build.VERSION.SDK_INT >= 28) lm.isLocationEnabled
+        else lm.isProviderEnabled(android.location.LocationManager.GPS_PROVIDER) ||
+            lm.isProviderEnabled(android.location.LocationManager.NETWORK_PROVIDER)
+    }.getOrDefault(true)
 
     companion object {
         private const val TAG = "SottoBle"
@@ -612,6 +669,15 @@ class BleLink(private val context: Context, private val callbacks: Callbacks) {
         /** Marks the advertisement's layout, so a future change can be told apart. */
         private const val FORMAT: Byte = 2   // advertisement layout: format byte then a 64-bit id
         private const val PEER_FRESH_MS = 45_000L
+        /**
+         * How recently a phone must have been heard for a send to be worth trying. Much shorter
+         * than PEER_FRESH_MS, which is about whether to show them as nearby: a phone last seen
+         * 44 seconds ago is probably gone, and betting a message on it costs twelve seconds of
+         * connection timeout before anything falls back to the speaker.
+         */
+        private const val PEER_SENDABLE_MS = 12_000L
+        private const val PEER_TICK_MS = 10_000L
+        private const val RETRY_MS = 30_000L
         private const val REASSEMBLE_MS = 5_000L
         private const val IDLE_MS = 25_000L
         private const val MAX_CONNS = 4

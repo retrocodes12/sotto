@@ -6,6 +6,7 @@ import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import java.nio.ByteBuffer
 
 class CarryTest {
     private var clock = 1_000_000L
@@ -15,7 +16,8 @@ class CarryTest {
     inner class Node(val id: Long) : Sync.Events {
         val store = Store(id, ::now)
         val outbox = ArrayList<Pair<Long, ByteArray>>()
-        val sync = Sync(id, store, ::now, { peer, f -> outbox.add(peer to f) }, this)
+        var radioWorks = true
+        val sync = Sync(id, store, ::now, { peer, f -> if (radioWorks) { outbox.add(peer to f); true } else false }, this)
         val received = ArrayList<Bundle>()
         val delivered = ArrayList<Triple<BundleKey, Int, Int>>()
         val handed = HashMap<BundleKey, Int>()
@@ -127,14 +129,30 @@ class CarryTest {
         assertNotNull(a.store[m.key]?.delivered)
     }
 
+    /**
+     * The tile says "reached about N phones", and the whole point is that N counts phones the
+     * sender never met. So the message goes to exactly one phone, spreads from there, and the
+     * sender meets that one phone again: it should come back knowing about all of them.
+     *
+     * The previous version of this test handed the message to all twelve directly and then read
+     * `a.reach[key] ?: a.store[key]!!.sketch.estimate()` -- the sender's own sketch, which of
+     * course already knew about the twelve phones the sender had just handed it to. It passed
+     * whether or not a single sketch ever made the return journey.
+     */
     @Test fun reachEstimateReturnsToTheOrigin() {
-        val a = Node(1); val others = (2L..13L).map { Node(it) }
+        val a = Node(1); val hub = Node(2); val rest = (3L..13L).map { Node(it) }
         val m = a.room("hello all")
-        for (o in others) meet(a, o)                       // everyone gets it directly from a
-        for (i in 0 until others.size - 1) meet(others[i], others[i + 1])   // they compare notes
-        meet(a, others.last())
-        val est = a.reach[m.key] ?: a.store[m.key]!!.sketch.estimate()
-        assertTrue("reach $est should be about 13", est in 9..20)
+        meet(a, hub)                                                    // one handover, and that is all a sees
+        for (o in rest) meet(hub, o)                                    // it spreads out of a's sight
+        for (i in 0 until rest.size - 1) meet(rest[i], rest[i + 1])     // they compare notes
+        assertEquals("a should still only know about itself and the one phone it met", 2, a.store[m.key]!!.sketch.estimate())
+
+        clock += Sync.INTERVAL_S + 1
+        meet(a, hub)                                                    // and a meets that phone again
+
+        val est = a.reach[m.key]
+        assertNotNull("the origin was never told how far its own message got", est)
+        assertTrue("reach $est should be most of the thirteen, not the two a saw", est!! >= 8)
     }
 
     @Test fun quotaLimitsOneOriginsRoomMessages() {
@@ -164,6 +182,189 @@ class CarryTest {
         assertEquals(Store.Verdict.NEW, s.accept(p2, 3L))
         assertEquals(Store.Verdict.DUPLICATE, s.accept(p1, 3L))
         assertEquals(1, s.size)
+    }
+
+
+    // ---- what the carried network refuses ---------------------------------------------------
+
+    /**
+     * The gate between a radio frame and this engine. It compared an unsigned first byte against
+     * a range built from signed byte constants, so it was never once true: every sync frame went
+     * to the sound parser instead, and the whole carry network was inert on the phone while
+     * passing every test in this file, because the tests call onFrame directly.
+     */
+    @Test fun everySyncFrameIsRecognisedAsOne() {
+        val a = Node(1); val b = Node(2)
+        a.room("hello"); b.room("hi")
+        meet(a, b)
+        val frames = a.outbox.map { it.second } + b.outbox.map { it.second }
+        val tags = listOf(Sync.TAG_HAVE, Sync.TAG_WANT, Sync.TAG_BUNDLE, Sync.TAG_SKETCH, Sync.TAG_DONE)
+        for (tag in tags) {
+            val f = ByteBuffer.allocate(11).put(tag).putLong(7L).putShort(0).array()
+            assertTrue("tag ${tag.toInt() and 0xFF} was not taken for a sync frame", a.sync.isSyncFrame(f))
+        }
+        for (f in frames) assertTrue("a frame we just sent is not one of ours", a.sync.isSyncFrame(f))
+        assertFalse(a.sync.isSyncFrame(byteArrayOf(0xA1.toByte(), 0, 1, 2, 3)))   // a text frame
+        assertFalse(a.sync.isSyncFrame("plain words".toByteArray()))
+        assertFalse(a.sync.isSyncFrame(ByteArray(0)))
+    }
+
+    /** Frames come off a radio anyone can transmit on; a short one must not take the app down. */
+    @Test fun aTruncatedSyncFrameIsSurvivable() {
+        val a = Node(1)
+        a.room("something to offer")
+        for (tag in listOf(Sync.TAG_HAVE, Sync.TAG_WANT, Sync.TAG_BUNDLE, Sync.TAG_SKETCH, Sync.TAG_DONE)) {
+            for (n in 0..48) {
+                val f = ByteArray(n)
+                if (n > 0) f[0] = tag
+                if (n >= 9) { val bb = ByteBuffer.wrap(f); bb.position(1); bb.putLong(2L) }
+                a.sync.onFrame(f)
+            }
+        }
+        // and a well-formed header claiming a count it does not carry
+        a.sync.onFrame(ByteBuffer.allocate(11).put(Sync.TAG_HAVE).putLong(2L).putShort(9999).array())
+        a.sync.onFrame(ByteBuffer.allocate(11).put(Sync.TAG_WANT).putLong(2L).putShort(9999).array())
+        a.sync.onFrame(ByteBuffer.allocate(11).put(Sync.TAG_SKETCH).putLong(2L).putShort(9999).array())
+    }
+
+    /**
+     * A receipt deletes a message from every phone that sees it, and nobody signs one. Taken
+     * from a stranger it is a way to erase anything whose key you have overheard in a HAVE.
+     */
+    @Test fun aForgedReceiptCannotEraseAMessage() {
+        val a = Node(1); val carrier = Node(3)
+        val m = a.private(2L, "for two only")
+        meet(a, carrier)
+        assertTrue("the carrier should be holding it", carrier.store.contains(m.key))
+
+        val forged = Bundle(99L, 1, Bundle.KIND_RECEIPT, now(), 600, a.id, 0, 0, Bundle.receiptPayload(m.key, 2, 5))
+        carrier.sync.onFrame(ByteBuffer.allocate(9 + forged.encode().size).put(Sync.TAG_BUNDLE).putLong(99L).put(forged.encode()).array())
+        assertTrue("a stranger erased a message from a carrier", carrier.store.contains(m.key))
+
+        // the real recipient still can
+        val real = Bundle(2L, 1, Bundle.KIND_RECEIPT, now(), 600, a.id, 0, 0, Bundle.receiptPayload(m.key, 2, 5))
+        carrier.sync.onFrame(ByteBuffer.allocate(9 + real.encode().size).put(Sync.TAG_BUNDLE).putLong(2L).put(real.encode()).array())
+        assertFalse("the recipient's own receipt did not vaccinate the carrier", carrier.store.contains(m.key))
+    }
+
+    /** And it cannot make the sender's tile claim a delivery that never happened. */
+    @Test fun aForgedReceiptCannotClaimDelivery() {
+        val a = Node(1)
+        val m = a.private(2L, "for two only")
+        val forged = Bundle(99L, 1, Bundle.KIND_RECEIPT, now(), 600, a.id, 0, 0, Bundle.receiptPayload(m.key, 9, 1))
+        a.sync.onFrame(ByteBuffer.allocate(9 + forged.encode().size).put(Sync.TAG_BUNDLE).putLong(99L).put(forged.encode()).array())
+        assertNull(a.store[m.key]?.delivered)
+        assertTrue(a.delivered.isEmpty())
+    }
+
+    /** Creation time and lifetime are both written by the sender. Neither buys immortality. */
+    @Test fun aBundleCannotOutliveWhatItsKindAllows() {
+        val s = Store(1L, ::now)
+        val greedy = Bundle(2L, 1, Bundle.KIND_ROOM, now(), 65535, 0, 0, 0, "stay".toByteArray())
+        assertEquals(Store.Verdict.NEW, s.accept(greedy, 3L))
+        assertTrue("a day is the most a room message gets", s[greedy.key]!!.expiresAt <= now() + 24 * 3600 + 1)
+        clock += 25 * 3600
+        assertEquals(listOf(greedy.key), s.expire())
+    }
+
+    /** A date in the future is not a longer life; it is a bundle nobody takes. */
+    @Test fun aBundleDatedInTheFutureIsRefused() {
+        val s = Store(1L, ::now)
+        val ahead = Bundle(2L, 1, Bundle.KIND_ROOM, now() + 400L * 86400, 600, 0, 0, 0, "stay".toByteArray())
+        assertEquals(Store.Verdict.EXPIRED, s.accept(ahead, 3L))
+        // a little skew is another phone's clock, not an attack
+        val slightly = Bundle(2L, 2, Bundle.KIND_ROOM, now() + 60, 600, 0, 0, 0, "fine".toByteArray())
+        assertEquals(Store.Verdict.NEW, s.accept(slightly, 3L))
+    }
+
+    /**
+     * The deadline has to come from when the message was written, not from when this phone
+     * happened to receive it: measured from arrival, every hop restarts the clock and a message
+     * that should live a day lives as long as anyone keeps passing it on.
+     */
+    @Test fun carryingAMessageDoesNotExtendItsLife() {
+        val born = now()
+        val chain = (1..6).map { Node(it.toLong()) }
+        val m = chain[0].room("passed along")
+        for (i in 0 until chain.size - 1) {
+            clock += 4 * 3600            // four hours between each meeting: 20 in all, inside the day
+            meet(chain[i], chain[i + 1])
+        }
+        val last = chain.last().store[m.key]
+        assertNotNull("it should have travelled the whole chain", last)
+        assertTrue(
+            "the last carrier expires it ${(last!!.expiresAt - born) / 3600} h after it was written",
+            last.expiresAt <= born + 24 * 3600 + 1,
+        )
+    }
+
+    /** A private message that claimed to flood would be handed to everyone in the district. */
+    @Test fun aPrivateBundleCannotClaimToFlood() {
+        val s = Store(1L, ::now)
+        val sneaky = Bundle(2L, 1, Bundle.KIND_PRIVATE, now(), 600, 5L, 0, 0, "read me".toByteArray())
+        s.accept(sneaky, 3L)
+        assertEquals(1, s[sneaky.key]!!.copies)
+        assertFalse("it should not be offered to phones that are not its destination", 9L in s.offerable(9L).map { it.bundle.dest })
+        val greedy = Bundle(2L, 2, Bundle.KIND_PRIVATE, now(), 600, 5L, 0, 250, "read me".toByteArray())
+        s.accept(greedy, 3L)
+        assertEquals(Bundle.MAX_COPIES, s[greedy.key]!!.copies)
+    }
+
+    /**
+     * The per-origin quota is keyed on an identity anyone can mint, so it stops nobody. This one
+     * is keyed on the phone actually in range, which is the thing an attacker cannot clone.
+     */
+    @Test fun onePhoneInRangeCannotFillTheStore() {
+        val s = Store(1L, ::now)
+        var taken = 0
+        // Every bundle claims a new origin AND a new sender id, which is all an attacker needs
+        // to walk through a quota keyed on either. They all arrive on one radio.
+        for (i in 1..500) {
+            val b = Bundle(1000L + i, 1, Bundle.KIND_PRIVATE, now(), 600, 7L, 0, 4, ByteArray(9_000))
+            if (s.accept(b, 2000L + i, "AA:BB:CC:DD:EE:FF") == Store.Verdict.NEW) taken++ else break
+        }
+        assertTrue("took $taken bundles from one radio", taken in 50..140)
+        assertTrue(s.bytes <= Store.INTAKE_BYTES_PER_WINDOW)
+        // a different phone gets its own budget, so an honest one is not punished for the flood
+        val honest = Bundle(77L, 1, Bundle.KIND_ROOM, now(), 600, 0, 0, 0, "hello".toByteArray())
+        assertEquals(Store.Verdict.NEW, s.accept(honest, 5L, "11:22:33:44:55:66"))
+    }
+
+    /** Eviction orders on when we took a message in, not on the date its sender wrote in it. */
+    @Test fun aFutureDateDoesNotSurviveEviction() {
+        val s = Store(1L, ::now, maxBundles = 4)
+        val mine = Bundle(1L, 1, Bundle.KIND_ROOM, now(), 600, 0, 0, 0, "mine".toByteArray())
+        s.accept(mine, null)
+        val future = Bundle(2L, 1, Bundle.KIND_ROOM, now() + 300L * 86400, 600, 0, 0, 0, "later".toByteArray())
+        s.accept(future, 3L)
+        for (i in 1..6) { clock += 1; s.accept(Bundle(9L, i, Bundle.KIND_ROOM, now(), 600, 0, 0, 0, "fill".toByteArray()), 3L) }
+        assertTrue("our own message was evicted", s.contains(mine.key))
+        assertFalse("a bundle dated in the future outlasted everything", s.contains(future.key))
+    }
+
+    /**
+     * A private message has a fixed number of copies in the whole network. Halving that budget
+     * for a frame that never left the radio does not fail loudly; it just quietly reaches fewer
+     * people, and there is no way to tell afterwards that it happened.
+     */
+    @Test fun aHandoverThatNeverLeftDoesNotSpendCopies() {
+        val a = Node(1); val b = Node(2)
+        val m = a.private(9L, "for someone else", copies = 16)
+        assertEquals(16, a.store[m.key]!!.copies)
+
+        a.sync.start(b.id)
+        b.sync.onFrame(a.outbox.removeAt(0).second)   // not removeFirst(): that is Java 21, absent below API 35
+        val want = b.outbox.first { it.second[0] == Sync.TAG_WANT }.second
+
+        a.radioWorks = false
+        a.sync.onFrame(want)
+        assertEquals("copies vanished with a frame that never left", 16, a.store[m.key]!!.copies)
+        assertFalse(b.id in a.store[m.key]!!.handedTo)
+
+        a.radioWorks = true
+        a.sync.onFrame(want)
+        assertEquals("a handover that did leave should spend half", 8, a.store[m.key]!!.copies)
+        assertTrue(b.id in a.store[m.key]!!.handedTo)
     }
 
     @Test fun exportImportKeepsEverything() {

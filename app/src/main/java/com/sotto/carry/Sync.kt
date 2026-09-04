@@ -19,7 +19,8 @@ class Sync(
     private val self: Long,
     private val store: Store,
     private val now: () -> Long,
-    private val send: (peer: Long, frame: ByteArray) -> Unit,
+    /** Hands one frame to the radio. False when it did not go, so a spray budget is not spent. */
+    private val send: (peer: Long, frame: ByteArray) -> Boolean,
     private val events: Events,
 ) {
     interface Events {
@@ -34,8 +35,14 @@ class Sync(
         fun onSyncDone(peer: Long, received: Int, sent: Int)
     }
 
-    private val lastSync = HashMap<Long, Long>()
-    private val counters = HashMap<Long, IntArray>()   // peer -> received, sent this session
+    // Bounded, and oldest-first: the peer id in a frame is chosen by whoever sent it, so an
+    // unbounded map here is a memory leak anyone in range can drive.
+    private val lastSync = object : LinkedHashMap<Long, Long>(64, 0.75f, true) {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<Long, Long>?) = size > MAX_PEERS
+    }
+    private val counters = object : LinkedHashMap<Long, IntArray>(64, 0.75f, true) {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<Long, IntArray>?) = size > MAX_PEERS
+    }
 
     /** True when it is worth talking to [peer] again. */
     fun due(peer: Long): Boolean = now() - (lastSync[peer] ?: 0L) >= INTERVAL_S
@@ -48,26 +55,37 @@ class Sync(
     }
 
     private fun sendHave(peer: Long) {
-        val offer = store.offerable(peer).sortedByDescending { it.bundle.created }.take(MAX_HAVE)
+        // Newest by when WE took it in, not by the date in the header: that is written by the
+        // sender, so ordering on it let a phone with generous dates fill all MAX_HAVE slots.
+        val offer = store.advertisable(peer).sortedByDescending { it.receivedAt }.take(MAX_HAVE)
         val bb = ByteBuffer.allocate(11 + offer.size * 13)
         bb.put(TAG_HAVE).putLong(self).putShort(offer.size.toShort())
         for (e in offer) { bb.put(e.bundle.key.encode()); bb.put(e.bundle.kind.toByte()) }
         send(peer, bb.array())
     }
 
-    fun isSyncFrame(frame: ByteArray) = frame.isNotEmpty() && (frame[0].toInt() and 0xFF) in TAG_HAVE.toInt()..TAG_DONE.toInt()
+    /**
+     * Both sides unsigned. TAG_HAVE.toInt() is -63, not 193: comparing the masked first byte
+     * against the unmasked constants was never true, and every sync frame went to the sound
+     * parser instead of here.
+     */
+    fun isSyncFrame(frame: ByteArray) =
+        frame.isNotEmpty() && (frame[0].toInt() and 0xFF) in (TAG_HAVE.toInt() and 0xFF)..(TAG_DONE.toInt() and 0xFF)
 
     /** Feeds a frame that arrived by radio. Ignores anything that is not ours. */
-    fun onFrame(frame: ByteArray) {
+    fun onFrame(frame: ByteArray, link: String? = null) {
         if (frame.size < 9) return
         val tag = frame[0]
+        // HAVE, WANT and SKETCH carry a count next; without it the reader would underflow, and
+        // this frame was written by whoever is in range.
+        if (frame.size < 11 && (tag == TAG_HAVE || tag == TAG_WANT || tag == TAG_SKETCH)) return
         val peer = ByteBuffer.wrap(frame, 1, 8).long
         if (peer == self) return
         if (!lastSync.containsKey(peer)) { lastSync[peer] = now(); counters[peer] = IntArray(2); if (tag == TAG_HAVE) sendHave(peer) }
         when (tag) {
             TAG_HAVE -> onHave(peer, frame)
             TAG_WANT -> onWant(peer, frame)
-            TAG_BUNDLE -> onBundle(peer, frame)
+            TAG_BUNDLE -> onBundle(peer, frame, link)
             TAG_SKETCH -> onSketch(peer, frame)
             TAG_DONE -> { val c = counters[peer] ?: IntArray(2); events.onSyncDone(peer, c[0], c[1]) }
         }
@@ -99,10 +117,19 @@ class Sync(
             if (bb.remaining() < 12) break
             val key = BundleKey.decode(ByteArray(12).also { bb.get(it) })
             val e = store[key] ?: continue
+            // HAVE now advertises everything we hold, so a peer can ask again for a spray
+            // message we have already given it. Its share was handed over once.
+            if (!e.bundle.floods && peer in e.handedTo) continue
             val copies = store.copiesToGive(e, peer) ?: continue
             val out = e.bundle.withHops(minOf(255, e.bundle.hops + 1), copies)
             val enc = out.encode()
-            send(peer, ByteBuffer.allocate(9 + enc.size).put(TAG_BUNDLE).putLong(self).put(enc).array())
+            // A private message has a fixed number of copies in the whole network. Spending half
+            // of them on a frame that never left the radio loses them: it does not get another
+            // budget, it just quietly reaches fewer people.
+            if (!send(peer, ByteBuffer.allocate(9 + enc.size).put(TAG_BUNDLE).putLong(self).put(enc).array())) {
+                store.returnCopies(e, peer, copies)
+                continue
+            }
             store.markHanded(key, peer)
             e.sketch.mark(peer, key)
             sent++
@@ -112,22 +139,29 @@ class Sync(
         send(peer, ByteBuffer.allocate(9).put(TAG_DONE).putLong(self).array())
     }
 
-    private fun onBundle(peer: Long, frame: ByteArray) {
+    private fun onBundle(peer: Long, frame: ByteArray, link: String?) {
         val b = Bundle.decode(frame, 9) ?: return
         when (b.kind) {
             Bundle.KIND_RECEIPT -> {
                 val (target, hops, minutes) = Bundle.parseReceipt(b.payload) ?: return
-                if (target.origin == self) {
-                    // our own message arrived: keep it so the tile can say "delivered", and
-                    // stop it spreading further (the receipt vaccinates the carriers).
-                    store[target]?.let { it.delivered = Triple(hops, minutes, now()); it.copies = 1 }
-                    events.onDelivered(target, hops, minutes)
-                } else {
-                    store.receipt(target, b.expiresAt)   // a carrier: drop it and never take it again
+                // Nobody signs a receipt, and acting on one deletes a message from the network.
+                // So only believe it from the phone the message was addressed to, and only about
+                // a message we hold and can check. An unverifiable receipt still travels on --
+                // the phone it is meant for can check it -- it just does not act here.
+                val held = store[target]
+                if (held != null && held.bundle.dest == b.origin && held.bundle.dest != 0L) {
+                    if (target.origin == self) {
+                        // our own message arrived: keep it so the tile can say "delivered", and
+                        // stop it spreading further (the receipt vaccinates the carriers).
+                        held.delivered = Triple(hops, minutes, now()); held.copies = 1
+                        events.onDelivered(target, hops, minutes)
+                    } else {
+                        store.receipt(target, b.expiresAt)   // a carrier: drop it and never take it again
+                    }
                 }
-                if (store.accept(b, peer) == Store.Verdict.NEW) { counters[peer]?.let { it[0]++ } }
+                if (store.accept(b, peer, link) == Store.Verdict.NEW) { counters[peer]?.let { it[0]++ } }
             }
-            else -> if (store.accept(b, peer) == Store.Verdict.NEW) { counters[peer]?.let { it[0]++ }; events.onBundle(b, peer) }
+            else -> if (store.accept(b, peer, link) == Store.Verdict.NEW) { counters[peer]?.let { it[0]++ }; events.onBundle(b, peer) }
         }
     }
 
@@ -172,5 +206,7 @@ class Sync(
         const val MAX_HAVE = 400
         const val MAX_WANT = 200
         const val MAX_SKETCH = 100
+        /** Phones whose last meeting we remember. Beyond this the least recent is forgotten. */
+        const val MAX_PEERS = 256
     }
 }

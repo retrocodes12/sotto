@@ -50,6 +50,7 @@ class Bundle(
     fun withHops(h: Int, c: Int = copies) = Bundle(origin, seq, kind, created, ttlMinutes, dest, h, c, payload)
 
     fun encode(): ByteArray = ByteBuffer.allocate(HEADER + payload.size)
+        .also { require(payload.size <= MAX_PAYLOAD) { "payload ${payload.size} B exceeds the length field" } }
         .put(kind.toByte()).putLong(origin).putInt(seq).putInt(created.toInt()).putShort(ttlMinutes.toShort())
         .putLong(dest).put(hops.toByte()).put(copies.toByte()).putShort(payload.size.toShort()).put(payload).array()
 
@@ -61,6 +62,22 @@ class Bundle(
         const val KIND_RECEIPT = 3
         const val KIND_PROFILE = 4
         const val KIND_PRIVATE_PHOTO = 5
+
+        /** The longest a bundle of each kind may live, whatever its header claims. */
+        fun maxTtlMinutes(kind: Int): Int = when (kind) {
+            KIND_ROOM -> 24 * 60
+            KIND_PROFILE -> 7 * 24 * 60
+            else -> 72 * 60          // private, photo, receipt
+        }
+
+        /** The most copies a bundle of each kind may claim. Zero means flood, and only a room
+         *  message or a profile is allowed to: a private one that floods is a privacy leak. */
+        fun legalCopies(kind: Int, claimed: Int): Int = when (kind) {
+            KIND_ROOM, KIND_PROFILE, KIND_RECEIPT -> 0
+            else -> claimed.coerceIn(1, MAX_COPIES)
+        }
+
+        const val MAX_COPIES = 16
 
         fun decode(b: ByteArray, at: Int = 0): Bundle? {
             if (b.size - at < HEADER) return null
@@ -78,6 +95,20 @@ class Bundle(
             return Bundle(origin, seq, kind, created, ttl, dest, hops, copies, payload)
         }
 
+        /**
+         * A private bundle's payload: the AES-GCM nonce counter, then the sealed text. The
+         * counter has to travel with the message. The bundle's own sequence identifies the
+         * message, not the conversation, and the nonce is built from the pair's counter -- the
+         * one the sound path also draws from, so that one key never sees one nonce twice.
+         */
+        fun sealedWithCounter(counter: Int, sealed: ByteArray): ByteArray =
+            ByteBuffer.allocate(4 + sealed.size).putInt(counter).put(sealed).array()
+
+        fun counterOf(payload: ByteArray): Int? =
+            if (payload.size < 5) null else ByteBuffer.wrap(payload, 0, 4).int
+
+        fun sealedOf(payload: ByteArray): ByteArray = payload.copyOfRange(4, payload.size)
+
         /** Receipt payload: the delivered key, the hops it arrived with, minutes it took. */
         fun receiptPayload(target: BundleKey, hops: Int, minutes: Int): ByteArray =
             ByteBuffer.allocate(15).put(target.encode()).put(hops.toByte()).putShort(minutes.coerceIn(0, 65535).toShort()).array()
@@ -91,15 +122,17 @@ class Bundle(
 
         /** Profile payload: name length, name, 32-byte X25519 public key. */
         fun profilePayload(name: String, publicKey: ByteArray): ByteArray {
-            val n = name.toByteArray(Charsets.UTF_8).let { if (it.size > 24) it.copyOf(24) else it }
+            require(publicKey.size >= 32) { "a profile carries a 32-byte public key" }
+            val n = com.sotto.Wire.cleanName(name).toByteArray(Charsets.UTF_8)
             return ByteArrayOutputStream().apply { write(n.size); write(n); write(publicKey, 0, 32) }.toByteArray()
         }
 
+        /** The name comes back through the same sieve: this one floods the network for a week. */
         fun parseProfile(payload: ByteArray): Pair<String, ByteArray>? {
             if (payload.isEmpty()) return null
             val n = payload[0].toInt() and 0xFF
             if (payload.size < 1 + n + 32) return null
-            return String(payload, 1, n, Charsets.UTF_8) to payload.copyOfRange(1 + n, 1 + n + 32)
+            return com.sotto.Wire.cleanName(String(payload, 1, n, Charsets.UTF_8)) to payload.copyOfRange(1 + n, 1 + n + 32)
         }
     }
 }

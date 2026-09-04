@@ -52,7 +52,7 @@ class CarryEngine(
     val store = Store(self, ::nowSeconds)
 
     private val sync = Sync(self, store, ::nowSeconds, { peer, frame ->
-        if (!transport.sendTo(peer, frame)) Log.d(TAG, "sync frame to ${peer.toString(16)} went nowhere")
+        transport.sendTo(peer, frame).also { if (!it) Log.d(TAG, "sync frame to ${peer.toString(16)} went nowhere") }
     }, object : Sync.Events {
         override fun onBundle(bundle: Bundle, peer: Long) {
             if (bundle.kind != Bundle.KIND_PROFILE) Log.i(TAG, "carried in: kind ${bundle.kind}, ${bundle.hops} hops")
@@ -109,20 +109,27 @@ class CarryEngine(
 
     fun isSyncFrame(frame: ByteArray) = sync.isSyncFrame(frame)
 
-    /** A sync frame arrived over the radio. */
-    fun onFrame(frame: ByteArray) {
+    /** A sync frame arrived over the radio, from the device at [link]. */
+    fun onFrame(frame: ByteArray, link: String? = null) {
         if (!started) return
-        sync.onFrame(frame)
+        sync.onFrame(frame, link)
     }
 
     // ---- putting things into the network ----------------------------------------------------
 
-    /** A room message: spreads to everyone, for a day. */
-    fun postRoom(text: ByteArray): BundleKey = post(Bundle(self, nextSeq(), Bundle.KIND_ROOM, nowSeconds(), ROOM_TTL_MIN, 0L, 0, 0, text))
+    /**
+     * A room message: spreads to everyone, for a day.
+     *
+     * [seq] is the message's own sequence, not a fresh one. The same number names this message
+     * on the speaker and in the network, which is what lets a phone that hears it both ways show
+     * it once, and what lets the sender's tile find its own bundle again to report on it.
+     */
+    fun postRoom(seq: Int, text: ByteArray): BundleKey =
+        post(Bundle(self, seq, Bundle.KIND_ROOM, nowSeconds(), ROOM_TTL_MIN, 0L, 0, 0, text))
 
     /** A private message, already sealed: a limited number of copies, for three days. */
-    fun postPrivate(dest: Long, sealed: ByteArray): BundleKey =
-        post(Bundle(self, nextSeq(), Bundle.KIND_PRIVATE, nowSeconds(), PRIVATE_TTL_MIN, dest, 0, SPRAY_COPIES, sealed))
+    fun postPrivate(seq: Int, dest: Long, sealed: ByteArray): BundleKey =
+        post(Bundle(self, seq, Bundle.KIND_PRIVATE, nowSeconds(), PRIVATE_TTL_MIN, dest, 0, SPRAY_COPIES, sealed))
 
     /** Who this phone is, so someone who has never met it can still write to it. */
     fun postProfile(name: String, publicKey: ByteArray): BundleKey =
@@ -178,12 +185,18 @@ class CarryEngine(
     }
 
     private fun save() {
+        // export() walks the whole store and can build megabytes; the snapshot is taken here on
+        // the main thread because the store has no locking, but nothing else happens here.
         val data = runCatching { store.export() }.getOrNull() ?: return
         io.execute {
             runCatching {
                 val tmp = File(file.parentFile, "carry.tmp")
-                tmp.writeBytes(data)
-                tmp.renameTo(file)
+                java.io.FileOutputStream(tmp).use { out ->
+                    out.write(data)
+                    out.flush()
+                    runCatching { out.fd.sync() }   // the rename must not overtake the bytes
+                }
+                if (!tmp.renameTo(file)) tmp.delete()
             }.onFailure { Log.w(TAG, "could not save what we carry", it) }
         }
     }

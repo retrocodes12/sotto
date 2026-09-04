@@ -84,7 +84,13 @@ object Transfer {
         val kind = first[0].toInt() and 0xFF
         val len = ((first[1].toInt() and 0xFF) shl 8) or (first[2].toInt() and 0xFF)
         val sender = ((first[3].toInt() and 0xFF) shl 8) or (first[4].toInt() and 0xFF)
-        val body = first.copyOfRange(META, first.size) + parts.drop(1).fold(ByteArray(0)) { acc, b -> acc + b }
+        // Sized once and filled, rather than folding with `acc + b`: that reallocated and copied
+        // the whole thing per chunk, which for a 255-chunk photo is megabytes of pointless copying.
+        val size = (first.size - META) + parts.drop(1).sumOf { it.size }
+        val body = ByteArray(size)
+        System.arraycopy(first, META, body, 0, first.size - META)
+        var at = first.size - META
+        for (i in 1 until parts.size) { System.arraycopy(parts[i], 0, body, at, parts[i].size); at += parts[i].size }
         return if (body.size == len) Assembled(kind, sender, first[5].toInt() and 0xFF, first[6].toInt() and 0xFF, body) else null
     }
 

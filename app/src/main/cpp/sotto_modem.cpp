@@ -403,7 +403,13 @@ void Decoder::onHop(const OnMessage & onMessage) {
         }
         m_syms.push_back(best);
         m_second.push_back(second);
-        m_conf.push_back(ss > 0 ? sb / ss : 1e9f);
+        // Confidence is how far the winning tone stands above the runner-up. When the runner-up
+        // scores nothing there are two very different reasons, and they were treated the same:
+        // one tone alone in the band (certain), or NO tone at all, because the symbol was lost
+        // to a fade or a dropout (the least certain thing there is). Calling the second case
+        // maximum confidence pointed the erasure and chase decoders away from exactly the
+        // symbols they exist to repair.
+        m_conf.push_back(ss > 0 ? sb / ss : (sb > 0 ? 1e9f : 0.0f));
         m_toneSum += cur[best];
         ++m_toneCount;
         m_binSum[base + best] += cur[best];

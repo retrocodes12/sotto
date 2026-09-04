@@ -1,4 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <color name="ic_launcher_background">#141311</color>
+    <!-- The window behind the app before Compose has drawn. Mirrors SottoColors.paper. -->
+    <color name="window">#F4F2EC</color>
 </resources>

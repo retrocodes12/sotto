@@ -12,6 +12,9 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.defaultMinSize
+import androidx.compose.foundation.layout.safeDrawingPadding
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.aspectRatio
@@ -92,8 +95,14 @@ fun ConversationScreen(vm: MainViewModel) {
     BackHandler(enabled = chat != null) { vm.openChat(null) }
     val shown = vm.log.filter { it.peer == chat }
 
-    Scaffold(containerColor = MaterialTheme.colorScheme.background) { padding ->
-        Column(Modifier.fillMaxSize().padding(padding).imePadding()) {
+    // Scaffold's own inset padding already covers the navigation bar, and imePadding covers it
+    // again once the keyboard is up, which left a dead band above the keyboard. Take the insets
+    // once, here, from safeDrawing -- which is the system bars, the cutout and the IME together.
+    Scaffold(
+        containerColor = MaterialTheme.colorScheme.background,
+        contentWindowInsets = WindowInsets(0),
+    ) { padding ->
+        Column(Modifier.fillMaxSize().padding(padding).safeDrawingPadding()) {
             Header(vm, onSettings = { showSettings = true })
             if (vm.chatPeers.isNotEmpty()) ChatChips(vm)
             if (shown.isEmpty()) {
@@ -159,9 +168,13 @@ private fun Header(vm: MainViewModel, onSettings: () -> Unit) {
 private fun StatusLine(vm: MainViewModel) {
     val active = vm.captureSource != null && vm.wantListening
     val db = if (vm.micLevel > 0f) 20f * log10(vm.micLevel) else -96f
-    val level by animateFloatAsState(targetValue = if (active) ((db + 60f) / 60f).coerceIn(0f, 1f) else 0f, label = "level")
+    // Quantised to twentieths before it becomes an animation target. Feeding it the raw level
+    // twelve times a second restarted the animation twelve times a second, so the whole app
+    // never reached an idle frame while the meter was on screen.
+    val target = if (active) (((db + 60f) / 60f).coerceIn(0f, 1f) * 20f).toInt() / 20f else 0f
+    val level by animateFloatAsState(targetValue = target, label = "level")
     Row(Modifier.padding(top = 2.dp), verticalAlignment = Alignment.CenterVertically) {
-        Box(Modifier.size(7.dp).clip(CircleShape).background(if (active) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outline))
+        Box(Modifier.size(7.dp).clip(CircleShape).background(if (active) MaterialTheme.colorScheme.tertiary else MaterialTheme.colorScheme.outline))
         Spacer(Modifier.width(8.dp))
         Text(vm.statusLine, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
         Spacer(Modifier.width(12.dp))
@@ -175,7 +188,7 @@ private fun StatusLine(vm: MainViewModel) {
 private fun ChatChips(vm: MainViewModel) {
     val near = vm.nearby.toSet()
     Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(start = 16.dp, end = 16.dp, top = 4.dp, bottom = 6.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-        Chip("Room", selected = vm.openChat == null, badge = 0, dot = false) { vm.openChat(null) }
+        Chip("Room", selected = vm.openChat == null, badge = vm.roomUnread, dot = false) { vm.openChat(null) }
         for (id in vm.chatPeers) {
             Chip(vm.identity.nameFor(id) ?: "", selected = vm.openChat == id, badge = vm.unread[id] ?: 0, dot = id in near) { vm.openChat(id) }
         }
@@ -190,7 +203,7 @@ private fun Chip(label: String, selected: Boolean, badge: Int, dot: Boolean, onC
         Modifier.clip(RoundedCornerShape(999.dp)).background(bg).clickable(onClick = onClick).padding(horizontal = 14.dp, vertical = 8.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        if (dot) { Box(Modifier.size(6.dp).clip(CircleShape).background(if (selected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.primary)); Spacer(Modifier.width(6.dp)) }
+        if (dot) { Box(Modifier.size(6.dp).clip(CircleShape).background(if (selected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.tertiary)); Spacer(Modifier.width(6.dp)) }
         Text(label, style = MaterialTheme.typography.labelLarge, color = fg)
         if (badge > 0) {
             Spacer(Modifier.width(6.dp))
@@ -423,7 +436,15 @@ private fun CardBody(card: LogEntry.Card, ink: Color) {
             if (f.getOrElse(1) { "" }.isNotEmpty()) Text("password  ${f[1]}", style = MaterialTheme.typography.bodyMedium, color = ink.copy(alpha = 0.8f))
             Row {
                 if (f.getOrElse(1) { "" }.isNotEmpty()) ActionLine("Copy password", ink) {
-                    (context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager).setPrimaryClip(ClipData.newPlainText("Wi-Fi password", f[1]))
+                    val clip = ClipData.newPlainText("Wi-Fi password", f[1])
+                    // Otherwise Android 13 and later show the password in the clipboard preview
+                    // and let the keyboard keep it in its history.
+                    if (android.os.Build.VERSION.SDK_INT >= 33) {
+                        clip.description.extras = android.os.PersistableBundle().apply {
+                            putBoolean(android.content.ClipDescription.EXTRA_IS_SENSITIVE, true)
+                        }
+                    }
+                    (context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager).setPrimaryClip(clip)
                 }
                 Spacer(Modifier.width(16.dp))
                 ActionLine("Wi-Fi settings", ink) { runCatching { context.startActivity(Intent(Settings.ACTION_WIFI_SETTINGS)) } }
@@ -449,7 +470,18 @@ private fun CardBody(card: LogEntry.Card, ink: Color) {
 
 @Composable
 private fun ActionLine(label: String, ink: Color, onClick: () -> Unit) {
-    Text(label, style = MaterialTheme.typography.labelLarge, color = ink, modifier = Modifier.padding(top = 8.dp).clickable(onClick = onClick))
+    // clickable before padding, so the padding is inside the target instead of a dead margin
+    // around it, and a floor of 48dp: this was a ~20dp strip of text.
+    Box(
+        Modifier
+            .clip(RoundedCornerShape(8.dp))
+            .clickable(onClick = onClick)
+            .defaultMinSize(minHeight = 48.dp)
+            .padding(horizontal = 8.dp, vertical = 12.dp),
+        contentAlignment = Alignment.CenterStart,
+    ) {
+        Text(label, style = MaterialTheme.typography.labelLarge, color = ink)
+    }
 }
 
 /**

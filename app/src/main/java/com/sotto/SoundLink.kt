@@ -58,7 +58,12 @@ class SoundLink(private val context: Context, private val callbacks: Callbacks) 
 
     /** Call from the main thread. Any previous capture thread is stopped and joined first. */
     fun startListening() {
-        stopListening()
+        if (!stopListening()) {
+            // The old thread is still inside a read. Starting a second one would give two
+            // capture threads the same lock-free native decoders.
+            Log.w(TAG, "previous capture thread has not stopped; not starting another")
+            return
+        }
         val flag = AtomicBoolean(true)
         run = flag
         captureThread = Thread({ captureLoop(flag) }, "sotto-capture").apply {
@@ -67,12 +72,21 @@ class SoundLink(private val context: Context, private val callbacks: Callbacks) 
         }
     }
 
-    /** Stops the capture thread and waits for it. It exits within one frame read (about 21 ms). */
-    fun stopListening() {
+    /**
+     * Stops the capture thread and waits for it. It exits within one frame read (about 21 ms).
+     * Returns false if it had not stopped in time, which matters to [close]: freeing the native
+     * modem while that thread is still inside a decode is a crash in C++.
+     */
+    fun stopListening(): Boolean {
         run?.set(false)
-        captureThread?.let { if (it !== Thread.currentThread()) it.join(1000) }
+        val t = captureThread
         captureThread = null
         run = null
+        if (t == null || t === Thread.currentThread()) return true
+        // This is called from the main thread on every listen toggle, so the wait has to stay
+        // well inside the ANR window. The loop exits within one frame read, about 21 ms.
+        t.join(1000)
+        return !t.isAlive
     }
 
     /** Runs [task] on the transmit thread. Call [transmit] from inside it. */
@@ -90,12 +104,20 @@ class SoundLink(private val context: Context, private val callbacks: Callbacks) 
 
     fun transmit(payload: ByteArray, protocolId: Int, volume: Int): Boolean {
         val wave = modem.encode(payload, protocolId, volume) ?: return false
+        // Media volume at zero produces a waveform of digital silence, which used to be logged
+        // as a message sent. Nothing left the phone.
+        if (mediaVolumeFraction() <= 0f) {
+            Log.w(TAG, "media volume is zero; nothing would leave the speaker")
+            return false
+        }
         lastTransmitAt = SystemClock.elapsedRealtime()
         Log.i(TAG, "tx protocol $protocolId, ${payload.size} B, amplitude $volume, ${wave.size} samples (${wave.size / 48} ms)")
         decodeMuted.set(true)
         callbacks.onTransmitting(true)
+        var played = false
         try {
             playBlocking(wave)
+            played = true
         } catch (e: Exception) {
             Log.e(TAG, "playback failed", e)
         } finally {
@@ -104,8 +126,30 @@ class SoundLink(private val context: Context, private val callbacks: Callbacks) 
             decodeMuted.set(false)
             callbacks.onTransmitting(false)
         }
-        return true
+        return played   // a swallowed exception used to be reported as a message sent
     }
+
+    /**
+     * The device the tones must come out of. AudioTrack with USAGE_MEDIA follows the media route,
+     * so with earbuds paired every message played into somebody's ears and the room heard nothing
+     * -- while the app said it had been sent.
+     */
+    private fun builtinSpeaker(): android.media.AudioDeviceInfo? =
+        runCatching {
+            audioManager.getDevices(AudioManager.GET_DEVICES_OUTPUTS)
+                .firstOrNull { it.type == android.media.AudioDeviceInfo.TYPE_BUILTIN_SPEAKER }
+        }.getOrNull()
+
+    /** True when something is plugged in or paired that would otherwise take the sound. */
+    fun outputIsElsewhere(): Boolean = runCatching {
+        audioManager.getDevices(AudioManager.GET_DEVICES_OUTPUTS).any {
+            it.type == android.media.AudioDeviceInfo.TYPE_WIRED_HEADPHONES ||
+                it.type == android.media.AudioDeviceInfo.TYPE_WIRED_HEADSET ||
+                it.type == android.media.AudioDeviceInfo.TYPE_BLUETOOTH_A2DP ||
+                it.type == android.media.AudioDeviceInfo.TYPE_BLUETOOTH_SCO ||
+                it.type == android.media.AudioDeviceInfo.TYPE_USB_HEADSET
+        }
+    }.getOrDefault(false)
 
     /**
      * Listen before talking: block the calling (transmit) thread until no frame is being
@@ -137,8 +181,10 @@ class SoundLink(private val context: Context, private val callbacks: Callbacks) 
 
     /** Stops capture, then frees the modem on the transmit thread once any in-flight transmit ends. */
     fun close() {
-        stopListening()
-        txExecutor.execute { modem.close() }
+        val stopped = stopListening()
+        // If the capture thread would not stop, leak the native modem rather than free it under
+        // that thread's feet. The process is going away anyway.
+        if (stopped) txExecutor.execute { modem.close() } else Log.w(TAG, "capture thread still running; leaving the modem alone")
         txExecutor.shutdown()
     }
 
@@ -164,6 +210,8 @@ class SoundLink(private val context: Context, private val callbacks: Callbacks) 
             callbacks.onCaptureStarted(sourceName)
 
             var reads = 0
+            var emptyReads = 0
+            var silentReads = 0
             var energy = 0.0
             var energyCount = 0
             while (flag.get()) {
@@ -173,14 +221,36 @@ class SoundLink(private val context: Context, private val callbacks: Callbacks) 
                         reason = "Microphone stopped delivering audio (error $n)"
                         break
                     }
+                    // Any other non-positive return comes back immediately, so looping straight
+                    // round would spin a core flat out and drain the battery in silence. Give it
+                    // a few frames' grace, and give up if it never recovers.
+                    if (++emptyReads > MAX_EMPTY_READS) {
+                        reason = "Microphone stopped delivering audio"
+                        break
+                    }
+                    SystemClock.sleep(20)
                     continue
                 }
+                emptyReads = 0
 
                 var sum = 0.0
                 for (i in 0 until n) {
                     val v = frame[i].toDouble()
                     sum += v * v
                 }
+                // A real microphone never delivers exactly zero for long: there is always some
+                // dither. A stream of true silence means something else has taken the mic (a
+                // call, another recorder) or the system has muted us, and the UI would otherwise
+                // go on saying "listening" for as long as the user left it.
+                if (sum == 0.0) {
+                    if (++silentReads > MAX_SILENT_READS) {
+                        reason = "The microphone is delivering silence. Another app may be using it."
+                        break
+                    }
+                } else {
+                    silentReads = 0
+                }
+
                 energy += sum
                 energyCount += n
                 if (++reads % LEVEL_EVERY_READS == 0) {
@@ -308,6 +378,11 @@ class SoundLink(private val context: Context, private val callbacks: Callbacks) 
             track.release()
             throw IllegalStateException("AudioTrack failed to initialise")
         }
+        // Send it out of the phone's own speaker whatever else is connected. A message meant for
+        // the room is not a message for your headphones.
+        builtinSpeaker()?.let { speaker ->
+            if (!track.setPreferredDevice(speaker)) Log.w(TAG, "could not pin playback to the speaker")
+        }
 
         // Trailing silence so the end marker has left the DAC before stop().
         val tail = SAMPLE_RATE / 10
@@ -337,6 +412,8 @@ class SoundLink(private val context: Context, private val callbacks: Callbacks) 
         private const val TAG = "SoundLink"
         const val SAMPLE_RATE = Modem.SAMPLE_RATE
         const val RESUME_GUARD_MS = 300L
+        private const val MAX_EMPTY_READS = 250     // about five seconds of nothing
+        private const val MAX_SILENT_READS = 1400   // about thirty seconds of exact digital silence
         private const val LEVEL_EVERY_READS = 4
     }
 }

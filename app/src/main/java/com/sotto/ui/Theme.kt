@@ -25,7 +25,8 @@ object SottoColors {
     val paper = Color(0xFFF4F2EC)
     val ink = Color(0xFF141311)
     val tileLight = Color(0xFFE7E4DC)
-    val mutedLight = Color(0xFF77746C)
+    // 4.75:1 on paper. The old #77746C was 4.17:1, under the 4.5:1 that body text needs.
+    val mutedLight = Color(0xFF6E6B63)
     val hairlineLight = Color(0xFFD6D2C8)
 
     val night = Color(0xFF141311)
@@ -35,6 +36,12 @@ object SottoColors {
     val hairlineDark = Color(0xFF34322E)
 
     val accent = Color(0xFFFFD23F)
+    /**
+     * The same yellow, dark enough to be seen ON paper rather than behind ink. The accent works
+     * as a background with dark text on it (13:1) and disappears as a small shape on a light
+     * ground (1.2:1) -- which is exactly what the listening dot and the presence dots are.
+     */
+    val accentDeep = Color(0xFF8A6A00)
     val danger = Color(0xFFD9442B)
 }
 
@@ -74,6 +81,7 @@ fun SottoTheme(content: @Composable () -> Unit) {
     val dark = isSystemInDarkTheme()
     val scheme = if (dark) darkColorScheme(
         primary = SottoColors.accent, onPrimary = SottoColors.ink,
+        tertiary = SottoColors.accent, onTertiary = SottoColors.ink,   // small shapes: on night, the yellow reads
         secondary = SottoColors.bone, onSecondary = SottoColors.night,
         background = SottoColors.night, onBackground = SottoColors.bone,
         surface = SottoColors.night, onSurface = SottoColors.bone,
@@ -83,6 +91,7 @@ fun SottoTheme(content: @Composable () -> Unit) {
         error = SottoColors.danger, onError = SottoColors.bone,
     ) else lightColorScheme(
         primary = SottoColors.accent, onPrimary = SottoColors.ink,
+        tertiary = SottoColors.accentDeep, onTertiary = SottoColors.paper,   // small shapes on paper
         secondary = SottoColors.ink, onSecondary = SottoColors.paper,
         background = SottoColors.paper, onBackground = SottoColors.ink,
         surface = SottoColors.paper, onSurface = SottoColors.ink,

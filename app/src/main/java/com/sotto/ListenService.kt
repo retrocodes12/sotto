@@ -51,15 +51,24 @@ class ListenService : Service() {
         try {
             ServiceCompat.startForeground(
                 this, NOTIFICATION_ID, n,
-                if (Build.VERSION.SDK_INT >= 29) ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE else 0,
+                // FOREGROUND_SERVICE_TYPE_MICROPHONE arrived in API 30, not 29.
+                if (Build.VERSION.SDK_INT >= 30) ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE else 0,
             )
         } catch (e: Exception) {   // background start refused, or a permission changed under us
             stopSelf()
             return START_NOT_STICKY
         }
         if (wakeLock == null) {
-            wakeLock = getSystemService(PowerManager::class.java).newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "sotto:listen").also { it.acquire() }
+            // No timeout on purpose. This is the whole point of the service: the user has asked
+            // to keep listening with the screen off, the notification says so, and it goes away
+            // the moment they stop. A timeout here would silently deafen the phone overnight.
+            // Not reference counted, so a second start command cannot stack a second acquire.
+            wakeLock = getSystemService(PowerManager::class.java)
+                .newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "sotto:listen")
+                .also { it.setReferenceCounted(false); it.acquire() }
         }
+        // A sticky restart brings the process back with no activity, so nothing else will start
+        // the radio or the carry network. setListening does all three.
         if (restarted) (application as SottoApplication).engine.setListening(true)
         return START_STICKY
     }
@@ -76,12 +85,17 @@ class ListenService : Service() {
         const val NOTIFICATION_ID = 1
         private const val ACTION_STOP = "com.sotto.STOP_LISTENING"
 
-        fun start(context: Context) {
-            context.startForegroundService(Intent(context, ListenService::class.java))
-        }
+        /**
+         * False when the system refused. From Android 12 a foreground service cannot be started
+         * from the background, and from Android 14 one that holds the microphone cannot be
+         * started from the background at all -- and the exception is thrown here, at the caller,
+         * where it would take the app down rather than surface as a failure.
+         */
+        fun start(context: Context): Boolean =
+            runCatching { context.startForegroundService(Intent(context, ListenService::class.java)) }.isSuccess
 
         fun stop(context: Context) {
-            context.stopService(Intent(context, ListenService::class.java))
+            runCatching { context.stopService(Intent(context, ListenService::class.java)) }
         }
     }
 }

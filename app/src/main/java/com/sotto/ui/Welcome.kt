@@ -25,13 +25,15 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.foundation.layout.safeDrawingPadding
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 
 /** First run, and the blocking state when the microphone was refused. */
 @Composable
 fun WelcomeScreen(denied: Boolean, onRequest: () -> Unit, onOpenSettings: () -> Unit) {
-    Column(Modifier.fillMaxSize().padding(horizontal = 28.dp, vertical = 40.dp), verticalArrangement = Arrangement.SpaceBetween) {
+    // Without this the buttons sit under the navigation bar on a gesture-navigation phone.
+    Column(Modifier.fillMaxSize().safeDrawingPadding().padding(horizontal = 28.dp, vertical = 40.dp), verticalArrangement = Arrangement.SpaceBetween) {
         Column {
             Spacer(Modifier.height(48.dp))
             Text("sotto", style = MaterialTheme.typography.displayLarge, color = MaterialTheme.colorScheme.onBackground)
@@ -70,16 +72,26 @@ fun WelcomeScreen(denied: Boolean, onRequest: () -> Unit, onOpenSettings: () -> 
 fun NameScreen(tag: String, onDone: (String) -> Unit) {
     var name by remember { mutableStateOf("") }
     val ok = name.trim().isNotEmpty()
-    Column(Modifier.fillMaxSize().imePadding().padding(horizontal = 28.dp, vertical = 40.dp), verticalArrangement = Arrangement.SpaceBetween) {
+    Column(Modifier.fillMaxSize().safeDrawingPadding().padding(horizontal = 28.dp, vertical = 40.dp), verticalArrangement = Arrangement.SpaceBetween) {
         Column {
             Spacer(Modifier.height(48.dp))
             Text("sotto", style = MaterialTheme.typography.displayLarge, color = MaterialTheme.colorScheme.onBackground)
             Spacer(Modifier.height(24.dp))
             Text("What should others call you?", style = MaterialTheme.typography.titleLarge, color = MaterialTheme.colorScheme.onBackground)
             Spacer(Modifier.height(16.dp))
+            val used = name.toByteArray(Charsets.UTF_8).size
             TextField(
-                value = name, onValueChange = { if (it.toByteArray().size <= 24) name = it },
+                // The limit is 24 bytes on the wire, which is 24 Latin letters but only eight
+                // Devanagari ones. It used to stop accepting keystrokes with no explanation.
+                value = name, onValueChange = { if (it.toByteArray(Charsets.UTF_8).size <= 24) name = it },
                 modifier = Modifier.fillMaxWidth(), singleLine = true,
+                supportingText = if (used < 14) null else ({
+                    Text(
+                        if (used >= 24) "That is the whole name a message has room for." else "$used of 24 characters' worth",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }),
                 placeholder = { Text("Your name", color = MaterialTheme.colorScheme.onSurfaceVariant) },
                 textStyle = MaterialTheme.typography.titleLarge,
                 shape = RoundedCornerShape(16.dp),

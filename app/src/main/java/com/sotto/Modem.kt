@@ -10,7 +10,12 @@ package com.sotto
  */
 class Modem(sampleRate: Int, samplesPerFrame: Int = SAMPLES_PER_FRAME) : AutoCloseable {
 
-    private var handle: Long = nativeCreate(sampleRate, samplesPerFrame)
+    /**
+     * Volatile, and checked before every call across it: [close] runs on the transmit thread
+     * while [decode] runs on the capture thread, and handing a freed pointer to the native side
+     * is a crash in C++ rather than an exception in Kotlin.
+     */
+    @Volatile private var handle: Long = nativeCreate(sampleRate, samplesPerFrame)
 
     init {
         check(handle != 0L) { "modem failed to initialise" }
@@ -18,28 +23,29 @@ class Modem(sampleRate: Int, samplesPerFrame: Int = SAMPLES_PER_FRAME) : AutoClo
 
     /** 16-bit mono waveform for [payload], or null if the modem rejected the request. */
     fun encode(payload: ByteArray, protocolId: Int, volume: Int): ShortArray? =
-        nativeEncode(handle, payload, protocolId, volume)
+        handle.let { if (it == 0L) null else nativeEncode(it, payload, protocolId, volume) }
 
     /**
      * Feed [count] samples to every decoder. Returns the first message decoded during
      * this call, else null. Call [takePending] until it returns null for any others.
      */
-    fun decode(samples: ShortArray, count: Int): ByteArray? = nativeDecode(handle, samples, count)
+    fun decode(samples: ShortArray, count: Int): ByteArray? =
+        handle.let { if (it == 0L) null else nativeDecode(it, samples, count) }
 
-    fun takePending(): ByteArray? = nativeTakePending(handle)
+    fun takePending(): ByteArray? = handle.let { if (it == 0L) null else nativeTakePending(it) }
 
     /** Drops any frame in progress; called after this phone's own transmission. */
-    fun reset() = nativeReset(handle)
+    fun reset() { handle.let { if (it != 0L) nativeReset(it) } }
 
     /** True while a frame is being received; relays wait for this to clear. */
-    val receiving: Boolean get() = nativeReceiving(handle)
+    val receiving: Boolean get() = handle.let { it != 0L && nativeReceiving(it) }
 
     /** Signal over noise, in dB, of the most recent message (0 for ggwave's). */
-    val lastRxSnr: Float get() = nativeLastRxSnr(handle)
+    val lastRxSnr: Float get() = handle.let { if (it == 0L) 0f else nativeLastRxSnr(it) }
 
     /** Protocol id of the most recent message returned by [decode] or [takePending]. */
     val lastRxProtocolId: Int
-        get() = nativeLastRxProtocolId(handle)
+        get() = handle.let { if (it == 0L) -1 else nativeLastRxProtocolId(it) }
 
     override fun close() {
         if (handle != 0L) {

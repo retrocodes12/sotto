@@ -11,4 +11,8 @@ Changes were made to src/reed-solomon/rs.hpp, all marked "Sotto patch":
 - DecodeBlock() honours FindErrorLocator's failure, accepts a codeword whose only
   corruption is the marked erasures, and rejects a found error that coincides with an
   erasure (the original then divided by zero in CorrectErrata).
+- ~ReedSolomon() frees its work buffer with free(), matching the malloc() that made it;
+  the original called delete[] on it. ggwave never hits this because it always passes
+  preallocated memory, but the Sotto modem constructs the class without any, so it ran
+  on every encode and every decode attempt.
 ggwave.cpp is unchanged.

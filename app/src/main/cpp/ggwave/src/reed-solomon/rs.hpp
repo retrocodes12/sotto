@@ -74,7 +74,7 @@ public:
 
     ~ReedSolomon() {
         if (owns_heap_memory) {
-            delete[] heap_memory;
+            free(heap_memory);   // Sotto patch: paired with the malloc above, not delete[]
         }
         // Dummy destructor, gcc-generated one crashes programm
         memory = NULL;

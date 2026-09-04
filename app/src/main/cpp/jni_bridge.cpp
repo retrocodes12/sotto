@@ -21,6 +21,9 @@ namespace {
 
 constexpr const char * kTag = "sotto-jni";
 constexpr int kSottoIdBase = 100;
+// Decoded messages waiting for Kotlin to collect them. Bounded so a stream of frames from
+// someone in the room cannot grow this without limit if the capture thread stalls.
+constexpr size_t kMaxPending = 64;
 
 struct Pending {
     std::vector<uint8_t> payload;
@@ -40,6 +43,16 @@ struct Engine {
 Engine * engineOf(jlong handle) {
     return reinterpret_cast<Engine *>(handle);
 }
+
+// Releases a pinned primitive array however the scope is left. The decoders allocate, so an
+// allocation failure inside one would otherwise leave the capture buffer pinned for good.
+struct PinnedShorts {
+    JNIEnv * env; jshortArray array; jshort * data;
+    PinnedShorts(JNIEnv * e, jshortArray a) : env(e), array(a), data(e->GetShortArrayElements(a, nullptr)) {}
+    ~PinnedShorts() { if (data != nullptr) env->ReleaseShortArrayElements(array, data, JNI_ABORT); }
+    PinnedShorts(const PinnedShorts &) = delete;
+    PinnedShorts & operator=(const PinnedShorts &) = delete;
+};
 
 jbyteArray takePending(JNIEnv * env, Engine * e) {
     if (e->pending.empty()) return nullptr;
@@ -154,20 +167,25 @@ Java_com_sotto_Modem_nativeDecode(JNIEnv * env, jclass, jlong handle, jshortArra
     auto * e = engineOf(handle);
     if (e == nullptr || samples == nullptr || count <= 0) return nullptr;
 
-    jshort * p = env->GetShortArrayElements(samples, nullptr);
-    if (p == nullptr) return nullptr;
+    // Never feed a decoder more samples than the caller actually handed over.
+    const jsize have = env->GetArrayLength(samples);
+    if (count > have) count = have;
 
-    if (e->ggRx.decode(p, static_cast<uint32_t>(count) * sizeof(int16_t))) {
+    PinnedShorts pin(env, samples);
+    if (pin.data == nullptr) return nullptr;
+
+    if (e->ggRx.decode(pin.data, static_cast<uint32_t>(count) * sizeof(int16_t))) {
         GGWave::TxRxData view;
         const int n = e->ggRx.rxTakeData(view);
         if (n > 0) e->pending.push_back({ std::vector<uint8_t>(view.data(), view.data() + n), static_cast<int>(e->ggRx.rxProtocolId()), 0.0f });
     }
     for (auto & dec : e->sottoRx) {
-        dec->feed(reinterpret_cast<const int16_t *>(p), count, [&](const uint8_t * d, int n) {
-            e->pending.push_back({ std::vector<uint8_t>(d, d + n), dec->params().id, dec->lastSnrDb() });
+        dec->feed(reinterpret_cast<const int16_t *>(pin.data), count, [&](const uint8_t * d, int n) {
+            if (e->pending.size() < kMaxPending) {
+                e->pending.push_back({ std::vector<uint8_t>(d, d + n), dec->params().id, dec->lastSnrDb() });
+            }
         });
     }
-    env->ReleaseShortArrayElements(samples, p, JNI_ABORT);
     return takePending(env, e);
 }
 

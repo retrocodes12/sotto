@@ -89,33 +89,48 @@ Free field, signal peak −21 dBFS at the microphone:
 
 | noise, dBFS | −40 | −30 | −25 | −20 | −15 | −10 | −5 |
 |---|---|---|---|---|---|---|---|
+| **Sotto Ultrasound** | 100 | 96 | 100 | 100 | 100 | 100 | 100 |
 | **Sotto Fast** | 100 | 100 | 100 | 100 | 100 | 100 | 0 |
-| **Sotto Robust** | 100 | 100 | 100 | 100 | 100 | 100 | 83 |
-| ggwave Normal | 100 | 100 | 100 | 8 | 0 | 0 | 0 |
+| **Sotto Robust** | 100 | 100 | 100 | 100 | 100 | 100 | 92 |
+| **Sotto Near** | 100 | 100 | 100 | 0 | 0 | 0 | 0 |
+| ggwave Normal | 100 | 100 | 92 | 0 | 0 | 0 | 0 |
 | ggwave Fast | 100 | 100 | 96 | 0 | 0 | 0 | 0 |
-| ggwave Fastest | 100 | 100 | 96 | 0 | 0 | 0 | 0 |
+| ggwave Fastest | 100 | 100 | 96 | 12 | 0 | 0 | 0 |
 
 Room, same signal:
 
 | noise, dBFS | −40 | −30 | −25 | −20 | −15 | −10 | −5 |
 |---|---|---|---|---|---|---|---|
-| **Sotto Fast** | 100 | 100 | 100 | 100 | 67 | 4 | 0 |
-| **Sotto Robust** | 100 | 100 | 100 | 100 | 100 | 71 | 0 |
-| ggwave Normal | 100 | 92 | 29 | 0 | 0 | 0 | 0 |
-| ggwave Fast | 100 | 88 | 38 | 0 | 0 | 0 | 0 |
-| ggwave Fastest | 96 | 88 | 25 | 0 | 0 | 0 | 0 |
-| ggwave Fast, hard-clipped | 42 | 29 | 46 | 25 | 0 | 0 | 0 |
+| **Sotto Ultrasound** | 100 | 100 | 100 | 100 | 100 | 92 | 0 |
+| **Sotto Fast** | 100 | 100 | 100 | 100 | 75 | 17 | 0 |
+| **Sotto Robust** | 100 | 100 | 100 | 100 | 96 | 75 | 0 |
+| **Sotto Near** | 100 | 62 | 8 | 0 | 0 | 0 | 0 |
+| ggwave Normal | 100 | 88 | 33 | 0 | 0 | 0 | 0 |
+| ggwave Fast | 100 | 96 | 33 | 0 | 0 | 0 | 0 |
+| ggwave Fastest | 100 | 88 | 33 | 0 | 0 | 0 | 0 |
+| ggwave Fast, hard-clipped | 42 | 25 | 71 | 25 | 0 | 0 | 0 |
 
-Sotto Fast keeps decoding with noise 6 dB above the signal's own peak; ggwave stops about
-10 dB before that in free field and 15 dB before it in the room. The last row is what
+Sotto's audible modes keep decoding with noise 6 dB above the signal's own peak; ggwave stops
+about 10 dB before that in free field and 15 dB before it in the room. The clipped row is what
 happens when ggwave's six-tone sum is driven past full scale to make it louder: clipping
 breaks it even without noise, which is why the app caps ggwave's amplitude at 25.
+
+The interesting row is the default one. Ultrasound is the most robust protocol here, not the
+most fragile — a narrow band above hearing means the reverb tail and the room's noise are
+mostly somewhere else, and the whole speaker goes into one tone. It pays for that in airtime:
+four seconds for twenty bytes against Sotto Fast's one. Silence is the reason to use it; the
+robustness is a bonus that only shows up once the band stops fighting the room.
+
+`tools/bench.cpp gate` runs a subset of these cells with a pass/fail floor under each and
+exits non-zero if any of them drops, so CI fails on a modem regression rather than printing
+a slightly smaller number nobody reads.
 
 | | airtime, 20 B | airtime, 100 B | decoder heap | decoder CPU |
 |---|---|---|---|---|
 | Sotto Fast | 1.22 s | 4.1 s | 32 KB | 2.9 ms per s of audio |
-| Sotto Robust | 2.43 s | 8.1 s | 48 KB | 3.1 ms |
-| Sotto Ultrasound | 4.4 s | 14.7 s | 40 KB | 3.0 ms |
+| Sotto Robust | 2.43 s | 8.1 s | 48 KB | 4.7 ms |
+| Sotto Ultrasound | 4.35 s | 14.7 s | 36 KB | 3.2 ms |
+| Sotto Near | 0.30 s | 0.83 s | 24 KB | 3.0 ms |
 | ggwave Fast | 2.09 s | 6.8 s | 8.2 MB | 0.6 ms idle, more while analysing |
 | ggwave Fastest | 1.39 s | 3.8 s | 8.2 MB | |
 
@@ -231,12 +246,40 @@ Android Studio's SDK Manager.
 git clone https://github.com/retrocodes12/sotto
 cd sotto
 echo "sdk.dir=$HOME/Android/Sdk" > local.properties
-./gradlew assembleDebug
-adb install -r app/build/outputs/apk/debug/app-debug.apk    # once per phone
+./gradlew assembleRelease
+adb install -r app/build/outputs/apk/release/app-release.apk    # once per phone
 ```
 
-The debug key signs the APK, so later builds install over the top. The host benchmark and
-the artwork tools build with plain `g++`; the commands are in their headers.
+`assembleDebug` also works and is the faster loop while developing; the published builds are
+release builds, which are not debuggable. Both are signed with the machine's Android debug key,
+which is why later builds install over the top — and why a build made on another machine will
+not.
+
+## Checks
+
+```sh
+./gradlew testDebugUnitTest    # the protocol, the crypto and the parsers
+./gradlew lintDebug            # zero errors is the bar
+```
+
+The tests are the part that runs without a phone, so they cover the parts that are hard to see
+on one: the X25519 against the RFC 7748 vectors, the AEAD refusing every tampered byte, every
+frame parser fed a hundred thousand hostile inputs without throwing, and the carry network run
+as a set of phones that meet in a chosen order.
+
+The modem has its own gate, because a radio regression shows up as a slightly smaller number
+rather than a failure:
+
+```sh
+g++ -O2 -std=c++17 -I app/src/main/cpp -I app/src/main/cpp/ggwave/src -I app/src/main/cpp/ggwave/include \
+    tools/bench.cpp app/src/main/cpp/sotto_modem.cpp app/src/main/cpp/ggwave/src/ggwave.cpp -o /tmp/bench
+/tmp/bench gate     # pass/fail floor per protocol and channel; non-zero if any cell drops
+/tmp/bench          # the full comparison tables above
+/tmp/bench diag 2 -15 1 200    # one protocol, one noise level, with the decoder's reasons
+```
+
+All three run on every push (`.github/workflows/build.yml`). The artwork tools build with plain
+`g++` too; the commands are in their headers.
 
 ## Range test
 
@@ -298,13 +341,58 @@ mean SNR of about 16–18 dB. In this flat the line-of-sight limit was never rea
 far end of the longest room the tone level was the same as at 2 m, which is the room's
 reverberant field taking over.
 
+## What it does not protect you from
+
+Sotto has no server and no accounts, and private messages are sealed end to end. That is not
+the same as being invisible, and the difference matters:
+
+- **Ultrasound is inaudible, not undetectable.** Any phone recording in the room captures the
+  same signal your microphone does; it is above hearing, not above a microphone. Someone who
+  is looking for it will find it.
+- **Who is talking is in the clear.** The sealed part is the text. The sender's tag, the
+  recipient's tag, the length and the timing all travel unencrypted, over sound and over
+  Bluetooth alike.
+- **Being present is broadcast.** A phone running Sotto advertises an id on Bluetooth and
+  chirps its presence over sound. Anyone in range can tell that this particular phone is here,
+  and can do so repeatedly to follow it.
+- **Room messages are for everyone.** They are not encrypted at all, by design.
+- **There is no forward secrecy.** A pair key is derived once from two long-term keys and used
+  from then on. A phone that is seized or unlocked reveals every private message it still
+  holds, and any recorded ciphertext from that pair.
+- **A substituted key is only caught if you look.** When a key changes, Sotto stops, says so
+  and shows both fingerprints — but it cannot tell a reinstall from someone in earshot
+  pretending. Comparing those eight characters out loud is the whole defence.
+- **Carriers hold your sealed messages.** For up to three days, phones you have never met keep
+  a copy of a private message they cannot read. They do learn that a message exists, roughly
+  how big it is, and who it is addressed to.
+- **The update check reaches GitHub.** It is the only network request the app makes, and it is
+  the one place your IP address meets this project.
+
 ## Status
 
-v0.6. The ultrasound mode has been tuned on real phones as above. The audible modes and the
-ggwave comparison on the same phones are next; one accidental Sotto Fast frame at close
-range failed parity at 30 dB SNR, which suggests Fast's 21 ms symbols suffer more from a
-real room's reverb than the simulator predicts, and that Robust may deserve to be the
-default.
+v0.24, and honest about it. What has been proven and what has not are different lists.
+
+Proven on two real phones: the ultrasound mode, tuned to their measured response, decoding
+10/10 at 25 cm and at 2 m, and 7/10 through one wall off sight.
+
+Proven on this laptop, by eighty tests that run in a second: the modem against a simulated
+channel including dropouts, with a pass/fail gate under it; the X25519 against the RFC 7748
+vectors; the AEAD against every single-bit tamper; the anti-replay window against every order
+its inputs can arrive in; every frame parser against a hundred thousand hostile inputs; the
+carry network as a set of phones meeting in a chosen order and forging receipts at each other.
+The modem is also clean under AddressSanitizer and UndefinedBehaviorSanitizer.
+
+Those tests were written after a twelve-dimension audit of this codebase found eighty-two
+defects, and they exist because of what it found. Two of them mattered more than the rest: the
+carry network could not receive a single frame, because the check deciding whether a frame
+belonged to it compared an unsigned byte against a signed range and was never once true; and
+carried private messages could not be decrypted by anybody, because the sender and the receiver
+built the nonce from two different counters. Both features had shipped. Neither had ever worked.
+
+Not yet seen on a phone at all: Bluetooth, the carry network, the audible modes, and the whole
+identity and private-message layer. Seventeen releases have shipped since the last time anything
+was measured on hardware, and the honest reading of that is that some of it does not work. The
+next thing this project needs is not a feature. It is three phones and an afternoon.
 
 ## Layout
 
@@ -314,14 +402,20 @@ app/src/main/cpp/jni_bridge.cpp              JNI: create, encode, decode, protoc
 app/src/main/cpp/ggwave/                     vendored ggwave, commit in VENDORED.md, MIT
 app/src/main/java/com/sotto/Modem.kt         Kotlin face over the engine
 app/src/main/java/com/sotto/SoundLink.kt     AudioRecord, AudioTrack, half-duplex gate
+app/src/main/java/com/sotto/BleLink.kt       the Bluetooth transport: advertise, scan, GATT
+app/src/main/java/com/sotto/Identity.kt      who this phone is, and the frame formats
+app/src/main/java/com/sotto/Crypto.kt        X25519, the pair key, AES-256-GCM
 app/src/main/java/com/sotto/MainViewModel.kt UI state, send, burst counting, log
 app/src/main/java/com/sotto/MainActivity.kt  permission gate and screen switch
+app/src/main/java/com/sotto/ListenService.kt the foreground service that keeps the mic open
+app/src/main/java/com/sotto/History.kt       messages kept on the phone
 app/src/main/java/com/sotto/ui/              conversation, welcome and settings screens, theme
 app/src/main/java/com/sotto/Transfer.kt      chunking and resend requests for photos
 app/src/main/java/com/sotto/Updates.kt       in-app updates from GitHub releases
 app/src/main/java/com/sotto/carry/           the carry network: bundles, store, sync, engine
-app/src/test/java/com/sotto/carry/           its unit tests, which run on a laptop
-tools/bench.cpp                              the channel simulation and the tables above
+app/src/test/java/com/sotto/              unit tests: crypto, parsers, transfers, the network
+.github/workflows/build.yml                  tests, lint, the modem gate and an APK per push
+tools/bench.cpp                              the channel simulation, the tables and the gate
 tools/dumpwave.cpp, hero.py                  the README artwork
 docs/                                        the generated SVGs
 ```

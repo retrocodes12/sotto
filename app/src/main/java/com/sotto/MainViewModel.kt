@@ -34,6 +34,21 @@ import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.random.Random
 
+/** Compose state that is also written to disk, so a setting the user changed stays changed. */
+private class Remembered<T>(
+    private val get: (String, T) -> T,
+    private val put: (String, T) -> Unit,
+    private val name: String,
+    fallback: T,
+) {
+    private val state = androidx.compose.runtime.mutableStateOf(get(name, fallback))
+    operator fun getValue(owner: Any?, property: kotlin.reflect.KProperty<*>): T = state.value
+    operator fun setValue(owner: Any?, property: kotlin.reflect.KProperty<*>, value: T) {
+        state.value = value
+        put(name, value)
+    }
+}
+
 class LogEntry(
     val id: Long,
     val time: String,
@@ -83,15 +98,21 @@ class MainViewModel(app: Application) : AndroidViewModel(app), SoundLink.Callbac
     private val link = SoundLink(app, this)
     val identity = IdentityStore(app)
 
+    private fun remembered(name: String, fallback: Boolean) =
+        Remembered(identity::flag, identity::setFlag, name, fallback)
+
+    private fun counted(name: String, fallback: Int) =
+        Remembered(identity::number, identity::setNumber, name, fallback)
+
     /**
      * The radio, beside the speaker. It carries exactly the same frames, so names, private
      * chats, receipts, relaying and photo transfers work over it without knowing it exists.
      * Everything falls back to sound the moment no phone is in Bluetooth range.
      */
     private val ble = BleLink(app, object : BleLink.Callbacks {
-        override fun onBleFrame(payload: ByteArray) {
+        override fun onBleFrame(payload: ByteArray, link: String) {
             // The carry network's own frames never reach the sound world's parser.
-            if (carry.isSyncFrame(payload)) main.post { carry.onFrame(payload) }
+            if (carry.isSyncFrame(payload)) main.post { carry.onFrame(payload, link) }
             else onMessage(payload, BleLink.PROTOCOL_ID, 0f)
         }
         override fun onBlePresence(id64: Long, id16: Int, rssi: Int) {
@@ -128,7 +149,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app), SoundLink.Callbac
         private set
     var carryBytes by mutableStateOf(0L)
         private set
-    var carryOn by mutableStateOf(true)
+    var carryOn by remembered("carry", true)
         private set
 
     fun setCarry(on: Boolean) {
@@ -137,12 +158,17 @@ class MainViewModel(app: Application) : AndroidViewModel(app), SoundLink.Callbac
         if (!on) carry.forget()
     }
 
+    init {
+        // The engine is built before the setting is read, so tell it what the user actually chose.
+        carry.carrying = carryOn
+    }
+
     /** The tile that belongs to one of our own carried messages. */
     private fun logFor(key: BundleKey): Long? =
         if (key.origin != identity.id64) null else log.firstOrNull { it.bundleSeq == key.seq }?.id
 
     /** The user's choice. Off keeps every frame on the speaker. */
-    var bluetoothOn by mutableStateOf(true)
+    var bluetoothOn by remembered("bluetooth", true)
         private set
     var bleRunning by mutableStateOf(false)
         private set
@@ -164,6 +190,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app), SoundLink.Callbac
     /** Called once the permissions exist. Safe to call again. */
     fun startBle() {
         if (!bluetoothOn || !ble.hasHardware()) return
+        if (!wantListening && listeningDecided) return   // off means off, radio included
         if (ble.missingPermissions().isNotEmpty()) { bleNote = "Bluetooth permission not granted"; return }
         ble.start(identity.id, identity.id64)
         publishProfile()
@@ -203,10 +230,10 @@ class MainViewModel(app: Application) : AndroidViewModel(app), SoundLink.Callbac
     private val helloSentAt = HashMap<Int, Long>()
 
     /** Repeat what this phone hears so phones out of earshot of the sender still get it. */
-    var relayForOthers by mutableStateOf(true)
+    var relayForOthers by remembered("relay", true)
 
     /** Keep the microphone open with the screen off, behind a quiet notification. */
-    var listenInBackground by mutableStateOf(true)
+    var listenInBackground by remembered("background", true)
         private set
 
     fun keepListeningInBackground(on: Boolean) {
@@ -214,8 +241,9 @@ class MainViewModel(app: Application) : AndroidViewModel(app), SoundLink.Callbac
         if (!on) {
             ListenService.stop(getApplication())
             if (!inForeground) { link.stopListening(); ble.stop() }
-        } else if (wantListening) {
-            ListenService.start(getApplication())
+        } else if (wantListening && !ListenService.start(getApplication())) {
+            listenInBackground = false
+            status = "Android would not let Sotto listen in the background."
         }
     }
 
@@ -315,14 +343,34 @@ class MainViewModel(app: Application) : AndroidViewModel(app), SoundLink.Callbac
         private set
     val unread = mutableStateMapOf<Int, Int>()
     private val keySentAt = HashMap<Int, Long>()
-    val cryptoOk: Boolean = Crypto.selfTest().also { if (!it) Log.e(TAG, "X25519 self-test failed; private chat disabled") }
+    /**
+     * Whether the hand-written X25519 gives the RFC 7748 answer on this device. Checked off the
+     * main thread -- it is another full ladder, and nothing needs it until the user opens a
+     * private chat. Assumed good until proven otherwise, then latched false.
+     */
+    var cryptoOk by mutableStateOf(true)
+        private set
+
+    init {
+        Thread({
+            val ok = Crypto.selfTest()
+            if (!ok) Log.e(TAG, "X25519 self-test failed; private chat disabled")
+            main.post { cryptoOk = ok }
+        }, "sotto-selftest").start()
+    }
+
+    /** Unread room messages. The room has no peer id, so it gets a key of its own. */
+    val roomUnread: Int get() = unread[ROOM] ?: 0
 
     fun openChat(peer: Int?) {
         openChat = peer
-        if (peer != null) {
-            unread.remove(peer)
-            if (!identity.peerKeys.containsKey(peer)) sendKey(peer)
-        }
+        unread.remove(peer ?: ROOM)
+        if (peer != null && !identity.peerKeys.containsKey(peer)) sendKey(peer)
+    }
+
+    /** A room message arrived. If the user is reading a private chat, they cannot see it. */
+    private fun noteRoomUnread() {
+        if (openChat != null) unread[ROOM] = (unread[ROOM] ?: 0) + 1
     }
 
     /** People to offer chats with: anyone heard, most recent first. */
@@ -360,15 +408,22 @@ class MainViewModel(app: Application) : AndroidViewModel(app), SoundLink.Callbac
 
     private val io = java.util.concurrent.Executors.newSingleThreadExecutor { r -> Thread(r, "sotto-history") }
     private var saveQueued = false
+    /** False until what was on disk is back in memory. Saving before that erases it. */
+    private var historyReady = false
     private val saveNow = Runnable {
         saveQueued = false
         val snapshot = log.toList()
         io.execute { runCatching { History.save(getApplication(), snapshot) }.onFailure { Log.w(TAG, "history save failed", it) } }
     }
 
-    /** Coalesces bursts of changes into one write a second later. */
+    /**
+     * Coalesces bursts of changes into one write a second later -- but never before the restore
+     * has landed. A message arriving in that first second used to trigger a save of a log holding
+     * only that message, and the save deletes every photo file no entry refers to: the entire
+     * picture archive, gone, for having received one message at the wrong moment.
+     */
     private fun scheduleSave() {
-        if (saveQueued) return
+        if (saveQueued || !historyReady) return
         saveQueued = true
         main.postDelayed(saveNow, 1000)
     }
@@ -394,12 +449,12 @@ class MainViewModel(app: Application) : AndroidViewModel(app), SoundLink.Callbac
         private set
     var transmitting by mutableStateOf(false)
         private set
-    var protocolId by mutableIntStateOf(Modem.DEFAULT_PROTOCOL_ID)
+    var protocolId by counted("protocol", Modem.DEFAULT_PROTOCOL_ID)
     /** Auto: silent ultrasound (or Fast) for text, Near for photos. Off: [protocolId] for everything. */
-    var autoProtocol by mutableStateOf(true)
+    var autoProtocol by remembered("autoProtocol", true)
     /** The point of the app: messages nobody can hear. Off trades silence for range. */
-    var silentText by mutableStateOf(true)
-    var txVolume by mutableIntStateOf(DEFAULT_TX_VOLUME)
+    var silentText by remembered("silent", true)
+    var txVolume by counted("volume", DEFAULT_TX_VOLUME)
 
     val textProtocolId: Int
         get() = if (!autoProtocol) protocolId else if (silentText) Modem.ULTRASOUND_PROTOCOL_ID else Modem.DEFAULT_PROTOCOL_ID
@@ -444,10 +499,15 @@ class MainViewModel(app: Application) : AndroidViewModel(app), SoundLink.Callbac
     var transferring by mutableStateOf(false)
         private set
     private val incoming = HashMap<Int, Transfer.Incoming>()
-    private val control = LinkedBlockingQueue<Transfer.Frame>()
-    private var nextLogId = 1L
-    /** The tile for the message the radio is currently carrying, so its label can be corrected. */
-    private var radioLogId = 0L
+    /**
+     * Replies to a photo this phone is sending. Bounded, and only ever drained while a transfer
+     * is running: an unbounded queue here would grow for the life of the process on the REQ and
+     * DONE frames of everybody else's transfers, which anyone in range can also simply make up.
+     */
+    private val control = LinkedBlockingQueue<Transfer.Frame>(64)
+    // Started from the clock, not from 1: ids are also photo filenames, and until the restore
+    // lands we do not know what is already taken. Counting up from one collided with them.
+    private var nextLogId = System.currentTimeMillis()
 
     val draftBytes: Int
         get() = draft.toByteArray(Charsets.UTF_8).size
@@ -470,15 +530,30 @@ class MainViewModel(app: Application) : AndroidViewModel(app), SoundLink.Callbac
 
     private var listeningDecided = false
 
+    /**
+     * The master switch. It has to move every layer, not just the microphone: with only the
+     * microphone stopped the phone went on advertising its identity over Bluetooth and scanning
+     * for other phones indefinitely, which is a battery cost the user did not ask for and, worse,
+     * a beacon they believe they switched off.
+     */
     fun setListening(on: Boolean) {
         listeningDecided = true
         wantListening = on
         status = null
         if (on) {
             link.startListening()
-            if (listenInBackground) ListenService.start(getApplication())
+            startBle()
+            carry.start()   // idempotent; the service can restart the process without an activity
+            // The system can refuse a microphone service started from the background. Say so
+            // rather than leaving the switch looking on while nothing listens behind it.
+            if (listenInBackground && !ListenService.start(getApplication())) {
+                listenInBackground = false
+                status = "Android would not let Sotto listen in the background. Reopen the app and turn it on again."
+            }
         } else {
             link.stopListening()
+            ble.stop()
+            blePeers = 0
             ListenService.stop(getApplication())
         }
     }
@@ -544,10 +619,18 @@ class MainViewModel(app: Application) : AndroidViewModel(app), SoundLink.Callbac
         startBle()
         carry.start()
         if (wantListening && captureSource == null) link.startListening()
-        if (SystemClock.elapsedRealtime() - lastUpdateCheck > UPDATE_CHECK_EVERY_MS) checkForUpdates(manual = false)
+        if (autoUpdateCheck && SystemClock.elapsedRealtime() - lastUpdateCheck > UPDATE_CHECK_EVERY_MS) checkForUpdates(manual = false)
     }
 
     // ---- updates -------------------------------------------------------------------------
+
+    /**
+     * Whether to ask GitHub for a new version by itself. It is the only network request this app
+     * makes, and it happens on almost every cold start -- which for an app whose whole claim is
+     * that it needs no server is a thing the user should be able to say no to. Checking by hand
+     * still works with this off.
+     */
+    var autoUpdateCheck by remembered("autoUpdate", true)
 
     fun checkForUpdates(manual: Boolean) {
         if (updateChecking) return
@@ -590,7 +673,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app), SoundLink.Callbac
 
     fun onBackground() {
         inForeground = false
-        if (!listenInBackground) { link.stopListening(); ble.stop() }
+        if (!listenInBackground) { link.stopListening(); ble.stop(); blePeers = 0 }
     }
 
     /** Notifies about a message that arrived while the app was not on screen. */
@@ -629,25 +712,37 @@ class MainViewModel(app: Application) : AndroidViewModel(app), SoundLink.Callbac
         status = null
         sending = true
         draft = ""
+        val carriedSeq = intoTheNetwork(text, peer, seq)
+        // The tile goes up now, not when the speaker gets round to it. The transmit thread can
+        // be busy repeating somebody else's message for the better part of half a minute, and
+        // until it was free the sender saw an emptied box and no message anywhere.
+        val logId = addLog(
+            LogEntry.Kind.TX, text, pid, bytes.size, peer = peer,
+            seq = if (peer != null) seq else null, bundleSeq = carriedSeq, progress = "sending",
+        )
         val radioAttempt = bleReady() && ble.send(bytes) { ok ->
-            if (!ok) main.post {
-                Log.i(TAG, "Bluetooth did not carry it; falling back to the speaker")
-                updateLog(radioLogId) { it.with(protocol = Modem.protocolName(pid)) }
-                overTheSpeaker(bytes, pid, vol, quiet = false)
+            main.post {
+                sending = false
+                if (ok) {
+                    updateLog(logId) { it.with(protocol = Modem.protocolName(BleLink.PROTOCOL_ID), progress = null) }
+                } else {
+                    Log.i(TAG, "Bluetooth did not carry it; falling back to the speaker")
+                    updateLog(logId) { it.with(protocol = Modem.protocolName(pid), progress = null) }
+                    overTheSpeaker(bytes, pid, vol, quiet = false)
+                }
             }
         }
-        val carriedSeq = intoTheNetwork(text, peer, seq)
-        if (radioAttempt) {
-            sending = false
-            radioLogId = addLog(LogEntry.Kind.TX, text, BleLink.PROTOCOL_ID, bytes.size, peer = peer, seq = if (peer != null) seq else null, bundleSeq = carriedSeq)
-            return
-        }
+        if (radioAttempt) return
         link.post {
             val ok = link.transmit(bytes, pid, vol)
             main.post {
                 sending = false
-                if (ok) addLog(LogEntry.Kind.TX, text, pid, bytes.size, peer = peer, seq = if (peer != null) seq else null, bundleSeq = carriedSeq)
-                else { status = "${Modem.protocolName(pid)} refused to encode ${bytes.size} bytes"; if (draft.isEmpty()) draft = text }
+                if (ok) updateLog(logId) { it.with(progress = null) }
+                else {
+                    updateLog(logId) { it.with(progress = "not sent") }
+                    status = "Nothing left the speaker. Check the media volume and that nothing is plugged in."
+                    if (draft.isEmpty()) draft = text
+                }
             }
         }
     }
@@ -720,6 +815,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app), SoundLink.Callbac
                     }
                     trackBurst(m.text)
                     addLog(LogEntry.Kind.RX, m.text, protocolId, payload.size, senderId = m.id, via = m.via)
+                    noteRoomUnread()
                     notifyMessage(identity.nameFor(m.id) ?: "Sotto", m.text, m.id)
                     if (relayForOthers && m.hops > 0) scheduleRelay(key, Wire.relay(m.id, m.seq, m.hops - 1, identity.id, m.text), protocolId)
                 }
@@ -803,7 +899,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app), SoundLink.Callbac
                     if (dup) { pendingRelays[key]?.set(true); return@post }
                     noteSender(m.from, protocolId, direct = true)
                     if (m.to == identity.id) {
-                        if (m.counter <= identity.rxCounter(m.from)) { Log.w(TAG, "replayed private message from ${IdentityStore.tagOf(m.from)} ignored"); return@post }
+                        if (!identity.isFreshCounter(m.from, m.counter)) { Log.w(TAG, "replayed private message from ${IdentityStore.tagOf(m.from)} ignored"); return@post }
                         val k = identity.peerKeys[m.from]
                         val plain = k?.let { Crypto.decrypt(it, m.from, identity.id, m.counter, m.sealed) }
                         if (plain == null) {
@@ -811,7 +907,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app), SoundLink.Callbac
                             addLog(LogEntry.Kind.INFO, "A private message from ${identity.nameFor(m.from)} could not be read. Their key may have changed.", protocolId, 0, peer = m.from)
                             sendKey(m.from)
                         } else {
-                            identity.acceptRxCounter(m.from, m.counter)
+                            identity.recordCounter(m.from, m.counter)
                             val text = String(plain, Charsets.UTF_8)
                             Log.i(TAG, "rx private ${payload.size} B from ${IdentityStore.tagOf(m.from)}")
                             addLog(LogEntry.Kind.RX, text, protocolId, payload.size, senderId = m.from, peer = m.from)
@@ -827,6 +923,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app), SoundLink.Callbac
                     Log.i(TAG, "rx ${Modem.protocolName(protocolId)} ${payload.size} B plain: ${m.text}")
                     trackBurst(m.text)
                     addLog(LogEntry.Kind.RX, m.text, protocolId, payload.size)
+                    noteRoomUnread()
                 }
             }
         }
@@ -841,11 +938,15 @@ class MainViewModel(app: Application) : AndroidViewModel(app), SoundLink.Callbac
      */
     private fun intoTheNetwork(text: String, peer: Int?, seq: Int): Int? {
         if (!carryOn) return null
-        if (peer == null) { carry.postRoom(text.toByteArray(Charsets.UTF_8)); return seq }
+        if (peer == null) { carry.postRoom(seq, text.toByteArray(Charsets.UTF_8)); return seq }
         val dest = identity.wideId(peer) ?: return null   // nobody has told us their full id yet
         val key = identity.peerKeys[peer] ?: return null
-        val sealed = runCatching { Crypto.encrypt(key, identity.id, peer, seq, text.toByteArray(Charsets.UTF_8)) }.getOrNull() ?: return null
-        carry.postPrivate(dest, sealed)
+        // The nonce counter comes from the same place the sound path takes it, and travels with
+        // the message: the bundle's own sequence cannot serve, because it names the message
+        // rather than the pair, and two counters feeding one nonce is a repeated nonce.
+        val counter = identity.nextCounter(peer)
+        val sealed = runCatching { Crypto.encrypt(key, identity.id, peer, counter, text.toByteArray(Charsets.UTF_8)) }.getOrNull() ?: return null
+        carry.postPrivate(seq, dest, Bundle.sealedWithCounter(counter, sealed))
         return seq
     }
 
@@ -855,6 +956,15 @@ class MainViewModel(app: Application) : AndroidViewModel(app), SoundLink.Callbac
         when (b.kind) {
             Bundle.KIND_PROFILE -> {
                 val (name, pub) = Bundle.parseProfile(b.payload) ?: return
+                // A profile says "this is my name and this is my key", and nothing signs it. But
+                // it does not need a signature: an id IS the hash of the public key, so a profile
+                // whose key does not hash to its own origin is simply a lie, and one that does
+                // could only have been made by whoever holds that key. Without this check anyone
+                // could publish themselves as anybody, and the network would carry it for a week.
+                if (Ids.id64(pub) != b.origin) {
+                    Log.w(TAG, "profile claiming ${b.origin.toString(16)} carries a key that hashes elsewhere; dropped")
+                    return
+                }
                 identity.learnWideId(b.origin)
                 if (from16 != identity.id) {
                     val known = identity.contacts[from16]?.name?.isNotEmpty() == true
@@ -872,18 +982,25 @@ class MainViewModel(app: Application) : AndroidViewModel(app), SoundLink.Callbac
                 identity.heard(from16, direct = false)
                 val text = String(b.payload, Charsets.UTF_8)
                 addLog(LogEntry.Kind.RX, text, BleLink.PROTOCOL_ID, b.payload.size, senderId = from16, carriedHops = b.hops)
+                noteRoomUnread()
                 notifyMessage(identity.nameFor(from16) ?: "Sotto", text, from16)
             }
             Bundle.KIND_PRIVATE -> {
                 if (b.dest != identity.id64 || from16 == identity.id) return   // just carrying it
                 if (markSeen(seenKey(from16, b.seq and 0xFF, transfer = false))) { carry.acknowledge(b); return }
                 identity.learnWideId(b.origin)
+                val counter = Bundle.counterOf(b.payload) ?: return
+                if (!identity.isFreshCounter(from16, counter)) {
+                    Log.w(TAG, "replayed carried message from ${IdentityStore.tagOf(from16)} ignored")
+                    return
+                }
                 val key = identity.peerKeys[from16]
-                val plain = key?.let { Crypto.decrypt(it, from16, identity.id, b.seq, b.payload) }
+                val plain = key?.let { Crypto.decrypt(it, from16, identity.id, counter, Bundle.sealedOf(b.payload)) }
                 if (plain == null) {
                     addLog(LogEntry.Kind.INFO, "A carried private message from ${identity.nameFor(from16)} could not be read.", BleLink.PROTOCOL_ID, 0, peer = from16)
                     return
                 }
+                identity.recordCounter(from16, counter)
                 identity.heard(from16, direct = false)
                 val text = String(plain, Charsets.UTF_8)
                 addLog(LogEntry.Kind.RX, text, BleLink.PROTOCOL_ID, b.payload.size, senderId = from16, peer = from16, carriedHops = b.hops)
@@ -894,10 +1011,21 @@ class MainViewModel(app: Application) : AndroidViewModel(app), SoundLink.Callbac
         }
     }
 
-    /** Publishes who this phone is, so someone who has never met it can still write to it. */
-    private fun publishProfile() {
+    /**
+     * Publishes who this phone is, so someone who has never met it can still write to it.
+     *
+     * Only when there is something new to say. Every profile floods the whole network for a
+     * week, and this ran on every start of the radio -- so simply opening the app put another
+     * copy of the same name and the same key into everybody's store, week after week.
+     */
+    private fun publishProfile(force: Boolean = false) {
         if (!carryOn || identity.name.isEmpty()) return
+        val fingerprint = identity.name.hashCode() * 31 + identity.publicKey.contentHashCode()
+        val age = System.currentTimeMillis() - identity.number("profileAt", 0).toLong() * 1000
+        if (!force && fingerprint == identity.number("profileOf", 0) && age < PROFILE_REPUBLISH_MS) return
         carry.postProfile(identity.name, identity.publicKey)
+        identity.setNumber("profileOf", fingerprint)
+        identity.setNumber("profileAt", (System.currentTimeMillis() / 1000).toInt())
     }
 
     // ---- identity ------------------------------------------------------------------------
@@ -945,7 +1073,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app), SoundLink.Callbac
     fun setName(name: String) {
         identity.rename(name)
         helloSentAt.clear()
-        publishProfile()
+        publishProfile(force = true)
     }
 
     // ---- relaying ------------------------------------------------------------------------
@@ -1021,12 +1149,18 @@ class MainViewModel(app: Application) : AndroidViewModel(app), SoundLink.Callbac
 
     private fun onTransferFrame(f: Transfer.Frame, protocolId: Int) {
         when (f) {
-            is Transfer.Frame.Req, is Transfer.Frame.Done -> { control.offer(f); return }
+            // Only while we are the one sending; otherwise it is somebody else's conversation.
+            is Transfer.Frame.Req, is Transfer.Frame.Done -> { if (transferring) control.offer(f); return }
             else -> {}
         }
         val total = when (f) { is Transfer.Frame.Data -> f.total; is Transfer.Frame.End -> f.total; else -> return }
         // A finished or differently-sized entry under this id belongs to an older transfer.
         incoming[f.id]?.let { old -> if (old.total != total || (old.complete && f is Transfer.Frame.Data && f.seq == 0)) incoming.remove(f.id) }
+        // An END for a transfer nothing has arrived for is three bytes anybody can transmit, and
+        // answering it would put a photo tile in the history and send back a full frame asking
+        // for all 255 chunks. A transfer begins when its first chunk does, not when someone
+        // says it ended.
+        if (f is Transfer.Frame.End && !incoming.containsKey(f.id)) return
         val x = incoming.getOrPut(f.id) {
             val ownPhoto = f is Transfer.Frame.Data && f.seq == 0 && f.bytes.size >= 5 &&
                 (((f.bytes[3].toInt() and 0xFF) shl 8) or (f.bytes[4].toInt() and 0xFF)) == identity.id
@@ -1164,7 +1298,12 @@ class MainViewModel(app: Application) : AndroidViewModel(app), SoundLink.Callbac
             while (round < MAX_ROUNDS) {
                 for (seq in pass) {
                     val chunk = chunks[seq]
-                    if (!(bleReady() && ble.send(chunk) { ok -> if (!ok) overTheSpeaker(chunk, pid, vol, quiet = false) })) link.transmit(chunk, pid, vol)
+                    // No speaker fallback in the callback here. This loop is itself running on
+                    // the transmit thread, so overTheSpeaker would queue behind it and every
+                    // failed chunk would play out loud after the transfer had already finished.
+                    // A chunk the radio drops is simply one the receiver will ask for, and the
+                    // next round sends it -- by sound, if the radio has gone by then.
+                    if (!(bleReady() && ble.send(chunk) { })) link.transmit(chunk, pid, vol)
                     sent++
                     val n = sent
                     main.post { updateLog(logId) { it.with(progress = "sending, $n of ${chunks.size}" + if (round > 0) ", round ${round + 1}" else "", fraction = minOf(1f, n.toFloat() / chunks.size)) } }
@@ -1278,6 +1417,8 @@ class MainViewModel(app: Application) : AndroidViewModel(app), SoundLink.Callbac
             main.post {
                 log.addAll(restored)   // newest first already; anything logged meanwhile stays on top
                 nextLogId = maxOf(nextLogId, (restored.maxOfOrNull { it.id } ?: 0L) + 1)
+                historyReady = true
+                scheduleSave()
             }
         }
         main.postDelayed(presence, PRESENCE_TICK_MS)
@@ -1287,6 +1428,10 @@ class MainViewModel(app: Application) : AndroidViewModel(app), SoundLink.Callbac
         private const val TAG = "Sotto"
         const val MAX_BYTES = 100
         const val DEFAULT_TX_VOLUME = 100
+        /** The room's slot in the unread map. Not a real id: ids are 16 bit and this is not. */
+        private const val ROOM = -1
+        /** A profile lives a week; republishing one that has not changed is pure noise. */
+        private const val PROFILE_REPUBLISH_MS = 3L * 24 * 60 * 60 * 1000
         const val BURST_COUNT = 10
         const val BURST_GAP_MS = 2000L
         const val BURST_PAYLOAD_BYTES = 20
